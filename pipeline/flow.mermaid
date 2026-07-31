@@ -1,0 +1,101 @@
+---
+title: Clean Architecture Autopilot — 处理流程与每环节调用的 Skill/Agent
+---
+flowchart TD
+    INIT([INIT<br/>编排器: clean-architecture-autopilot]):::orch
+
+    subgraph P0["P0 研究（可选，存量代码库时）"]
+        direction TB
+        P0A["Agent: Explore / Autopilot Researcher"]:::agent
+        P0S["Superpowers: find-skills · context7"]:::sp
+    end
+
+    subgraph P1["P1 需求 → 实体/用例"]
+        direction TB
+        P1A["Agent: requirements-analyst<br/>(+ general-purpose)"]:::agent
+        P1L["本地Skill: use-case-extraction"]:::local
+        P1S["Superpowers: brainstorming(必做) · feature-spec"]:::sp
+    end
+
+    subgraph P2["P2 分层设计"]
+        direction TB
+        P2A["Agent: architecture-designer<br/>(+ Plan / Autopilot Designer·Planner)"]:::agent
+        P2L["本地Skill: layer-boundaries · component-principles · solid-principles"]:::local
+        P2S["Superpowers: writing-plans · plan-eng-review"]:::sp
+    end
+
+    G3{"G3 依赖规则门<br/>dependency-auditor"}:::gate
+    subgraph G3B["G3 调用"]
+        direction TB
+        G3L["本地Skill: dependency-rule · component-principles"]:::local
+        G3S["Superpowers: ast-code-analysis-superpower<br/>(ast-grep 机扫朝外依赖/环) · Explore"]:::sp
+    end
+
+    subgraph P4["P4 由内向外实现（按组件并行）"]
+        direction TB
+        P4A["Agent: Autopilot Implementer (每任务一个)"]:::agent
+        P4L["本地Skill: dependency-rule · solid-principles · layer-boundaries"]:::local
+        P4S["Superpowers: test-driven-development · executing-plans ·<br/>dispatching-parallel-agents · using-git-worktrees ·<br/>systematic-debugging/investigate · verification-before-completion"]:::sp
+    end
+
+    G5{"G5 架构评审门<br/>architecture-reviewer"}:::gate
+    subgraph G5B["G5 调用"]
+        direction TB
+        G5L["本地Skill: architecture-review-checklist (+三个深入skill)"]:::local
+        G5S["Superpowers: requesting-code-review · ast-code-analysis-superpower ·<br/>codex(对抗) · review · Agent: Autopilot Code Reviewer"]:::sp
+    end
+
+    subgraph P6["P6 收尾"]
+        direction TB
+        P6S["Superpowers: receiving-code-review ·<br/>finishing-a-development-branch · ship"]:::sp
+    end
+
+    DONE([DONE]):::orch
+
+    %% 主流程
+    INIT --> P0 --> P1 --> P2 --> G3
+    G3 -- APPROVED --> P4 --> G5
+    G5 -- PASS --> P6 --> DONE
+    G5 -- "PASS_WITH_CONCERNS(记债,需签字)" --> P6
+
+    %% 门内调用（虚线：表示该门执行时加载的 skill）
+    G3 -. "执行时加载" .-> G3B
+    G5 -. "执行时加载" .-> G5B
+
+    %% 反馈回路（虚线，有上限）
+    G3 -. "REVISE_REQUIRED (回P2, ≤2轮)" .-> P2
+    G5 -. "FAIL·结构问题 → 回P2" .-> P2
+    G5 -. "FAIL·代码问题 → 回P4" .-> P4
+
+    %% 用户决策回路
+    UL{{"USER LOOP 暂停问用户<br/>①需求歧义 ②技术选型<br/>③门超2轮 ④MAJOR转技术债"}}:::user
+    P1 -. "①" .-> UL
+    P2 -. "②" .-> UL
+    G3 -. "③" .-> UL
+    G5 -. "④" .-> UL
+
+    %% 运行日志与审计轨迹（所有环节追加写入，供核对与调优）
+    LOG[("运行日志 .cc-skill/&lt;任务简述&gt;/<br/>run.jsonl(追加) · manifest.json ·<br/>artifacts/*.json · summary.md")]:::log
+    P1 -. 追加事件 .-> LOG
+    P2 -. 追加事件 .-> LOG
+    G3 -. 追加事件 .-> LOG
+    P4 -. 追加事件 .-> LOG
+    G5 -. 追加事件 .-> LOG
+    UL -. 追加事件 .-> LOG
+    DONE -. 生成summary .-> LOG
+
+    %% 流程复盘调优（读日志+项目目录，产出调优报告，反哺下一轮各 phase/门）
+    TUNE["process-tuning 复盘调优<br/>输入: 项目目录(+.cc-skill日志)<br/>输出: 门有效性·返工热点·增强ROI·top3调优动作"]:::tune
+    LOG -. 读日志 .-> TUNE
+    DONE -. 读项目目录 .-> TUNE
+    TUNE -. "调优建议(下一轮)" .-> P1
+    TUNE -. "调门校准(下一轮)" .-> G3
+
+    classDef orch fill:#0291DA,color:#fff,stroke:#0277b5,stroke-width:2px;
+    classDef agent fill:#E3F2FD,color:#0d47a1,stroke:#1976d2;
+    classDef local fill:#E8F5E9,color:#1b5e20,stroke:#2e7d32;
+    classDef sp fill:#FFF3E0,color:#e65100,stroke:#ef6c00;
+    classDef gate fill:#FFEBEE,color:#b71c1c,stroke:#c62828,stroke-width:2px;
+    classDef user fill:#F3E5F5,color:#4a148c,stroke:#7b1fa2,stroke-dasharray:4 3;
+    classDef log fill:#ECEFF1,color:#263238,stroke:#546e7a,stroke-width:2px;
+    classDef tune fill:#FFFDE7,color:#5d4037,stroke:#f9a825,stroke-width:2px;
