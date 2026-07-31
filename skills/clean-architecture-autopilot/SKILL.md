@@ -289,3 +289,64 @@ looped repeatedly signals an ambiguous boundary upstream).
   that never help (drop them), phases that dominate wall-clock (parallelize or route
   to a cheaper model).
 
+## Progress Checkpoint & Resume (survives context compression)
+
+`run.jsonl` is append-only history — good for audit, but you'd have to replay it to
+know "where are we now". To survive context-window compression / a dropped session,
+the orchestrator MUST also keep a **single, overwritten-in-place** checkpoint file
+that answers "current position" at a glance.
+
+### state.json (rewritten atomically at EVERY phase/gate transition)
+Path: `.cc-skill/<task-slug>/state.json`
+```
+{
+  "run_id": "...",
+  "task_title": "...",
+  "current_phase": "P4",                       // where we are RIGHT NOW
+  "phase_status": "in_progress|awaiting_user|blocked|done",
+  "completed_phases": ["P1","P2","G3"],        // what's already accepted
+  "gate_verdicts": {"g3":"APPROVED","g5":null},
+  "loops": {"gate3_iterations":1,"gate5_iterations":0},
+  "artifact_pointers": {                        // reload these instead of re-deriving
+    "p1":"artifacts/p1-requirements.json",
+    "p2":"artifacts/p2-design.json",
+    "g3":"artifacts/g3-audit.json"
+  },
+  "p4_components": [                            // per-component progress for parallel work
+    {"name":"ordering","status":"DONE","worktree":"p4/place-order/ordering"},
+    {"name":"billing","status":"in_progress"}
+  ],
+  "pending_user_question": null,               // set when phase_status=awaiting_user
+  "open_questions": [], "debts": [],
+  "next_action": "implement billing component then join",
+  "updated_at": "ISO-8601"
+}
+```
+Rules:
+- Write it **before** emitting the matching `run.jsonl` event, and overwrite the
+  whole file each time (write-temp-then-rename for atomicity). It is the *current*
+  truth; `run.jsonl` is the *history*.
+- `artifact_pointers` must always point at the last-good snapshot of each phase, so
+  a resumed session reloads facts from disk rather than trusting a compressed memory.
+- On `awaiting_user`, record the exact question in `pending_user_question` so the
+  pause is resumable even if the chat context is lost.
+
+### Resume protocol (run at the start of every turn / after any context reset)
+1. If `.cc-skill/<task-slug>/state.json` exists, READ it first — do not re-plan from
+   scratch or re-ask answered questions.
+2. Reload the artifacts named in `artifact_pointers`; treat them as authoritative
+   over anything half-remembered in context.
+3. Continue from `current_phase` + `phase_status`:
+   - `in_progress` → resume that phase's work;
+   - `awaiting_user` → re-surface `pending_user_question`;
+   - `blocked` → re-enter systematic-debugging on the blocked component;
+   - `done` → report completion.
+4. Never advance past a gate whose verdict in `state.json` isn't the required value.
+5. Cross-check `state.json` against the tail of `run.jsonl`; if they disagree (e.g. a
+   crash between the two writes), trust `run.jsonl` (the durable append) and rebuild
+   `state.json` from it, logging a `conflict_logged`.
+
+This gives a deterministic "you are here" marker: even if the model's context is
+compressed and in-memory detail is lost, the next turn reads `state.json` +
+`artifact_pointers` and picks up exactly where it left off.
+

@@ -80,6 +80,12 @@ clean-code/
 用法：把 `clean-architecture-autopilot/SKILL.md` 作为系统提示喂给你的编码 Agent，附上需求，
 它会按状态机自行推进并在该问你的时候停下来。
 
+- **进度检查点与断点续跑（抗上下文压缩）**：除追加式 `run.jsonl` 外，每次 phase/门转移都会**原地覆写**
+  一个 `state.json`，一眼给出"当前在哪个 phase、状态、各门 verdict、循环轮数、该重载哪些 artifact、
+  有无待答问题、下一步动作"。每轮开始先读它：即使模型上下文被压缩、内存细节丢了，也能从 `state.json`
+  + `artifact_pointers` 精确续跑，而不是重新规划或重复提问；`state.json` 与 `run.jsonl` 尾部不一致
+  时以追加日志为准并重建。
+
 ---
 
 ## 3.6 用 Superpowers 增强每个环节

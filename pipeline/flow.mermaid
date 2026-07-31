@@ -75,7 +75,7 @@ flowchart TD
     G5 -. "④" .-> UL
 
     %% 运行日志与审计轨迹（所有环节追加写入，供核对与调优）
-    LOG[("运行日志 .cc-skill/&lt;任务简述&gt;/<br/>run.jsonl(追加) · manifest.json ·<br/>artifacts/*.json · summary.md")]:::log
+    LOG[("运行日志 .cc-skill/&lt;任务简述&gt;/<br/>state.json(当前位置·覆写,抗压缩) · run.jsonl(历史·追加)<br/>manifest.json · artifacts/*.json · summary.md")]:::log
     P1 -. 追加事件 .-> LOG
     P2 -. 追加事件 .-> LOG
     G3 -. 追加事件 .-> LOG
