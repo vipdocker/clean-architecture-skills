@@ -17,6 +17,41 @@ specification.
 
 ---
 
+## Step 0 — Bootstrap (RUN THIS FIRST, before P0/P1 — non-negotiable)
+
+Logging is a **mechanical command**, not a thing to remember. The FIRST action of
+this skill, before any analysis, is to create the run folder and checkpoint by
+running the bundled helper. If you skip this, no `.cc-skill/` will exist and the
+run is non-resumable — so do it immediately.
+
+```bash
+# resolve <project_dir> (the repo you are building in) and a short task title
+python3 "$(dirname "$0")/scripts/cc_log.py" init \
+  --root "<project_dir>" --title "<one-line task title>"
+# → prints the run dir, e.g. <project_dir>/.cc-skill/<task-slug>/
+```
+(The skill lives at `~/.qoderwork/skills/clean-architecture-autopilot/`; the helper
+is at `scripts/cc_log.py` there. Use that absolute path if `$0` is unavailable.)
+
+Then, at **every** phase enter/exit and **every** gate verdict, call:
+```bash
+python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
+  --phase P2 --event phase_enter --agent architecture-designer \
+  --skills layer-boundaries,component-principles --status in_progress
+python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
+  --phase G3 --event gate_verdict --verdict APPROVED --status in_progress
+```
+This writes `state.json` (current position, overwritten) AND appends `run.jsonl`
+(history) in one atomic call. At DONE, call `cc_log.py summary --body-file <md>`.
+
+**Enforcement rule:** you may not enter a phase whose `phase_enter` event has not
+been logged, and you may not advance past a gate whose `gate_verdict` has not been
+logged. If `.cc-skill/<slug>/` does not exist when you reach P1, STOP and run
+`init` first. Snapshots of each phase's exit artifact go under
+`.cc-skill/<slug>/artifacts/` (write them with your normal file tools).
+
+---
+
 ## State Machine
 
 ```

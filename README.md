@@ -76,6 +76,12 @@ clean-code/
   可调优点"）。日志只追加不覆盖、且屏蔽密钥；同名任务再跑时子目录追加时间戳后缀避免覆盖。
   用于后续**核对**（回放全过程）与**调优**（跨 `.cc-skill/` 各任务子目录发现反复循环的门、
   无用的增强、耗时瓶颈）。
+- **日志是机械命令，不靠模型自觉**：`.cc-skill/` 的创建与写入由随附脚本
+  `skills/clean-architecture-autopilot/scripts/cc_log.py` 落实。skill 的 **Step 0 Bootstrap**
+  强制第一步就 `cc_log.py init` 建目录，之后每次 phase 进出/门判都调 `cc_log.py event`（一次调用同时
+  覆写 `state.json` + 追加 `run.jsonl`）。强约束：`phase_enter` 未记录不得进入该 phase、`gate_verdict`
+  未记录不得过门；到 P1 时若 `.cc-skill/<slug>/` 不存在必须先补 `init`。这样避免"规范只是 prose、模型
+  跑起来却没生成 `.cc-skill/`"的问题。
 
 用法：把 `clean-architecture-autopilot/SKILL.md` 作为系统提示喂给你的编码 Agent，附上需求，
 它会按状态机自行推进并在该问你的时候停下来。
