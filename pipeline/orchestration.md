@@ -75,6 +75,13 @@ state. Run leaf components (fewest inward deps satisfied) first, respecting the
 component edges. Entities and use cases for a given domain slice are implemented
 before its adapters.
 
+The full rules — preconditions, `max_parallel` cap, git-worktree naming
+(`p4/<task-slug>/<component>`), topological merge order, and the quarantine/rollback
+behavior when a parallel component fails — live in the **Concurrency Contract**
+section of `skills/clean-architecture-autopilot/SKILL.md`. Concurrency is scoped to
+P4 only; P1→P2→G3→G5 stay sequential (gates must clear in order), and `main` is
+wired once, sequentially, after all components are green.
+
 ## Artifacts Passed Between Phases
 
 | From → To | Artifact key |

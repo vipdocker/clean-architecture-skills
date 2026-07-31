@@ -159,6 +159,58 @@ exclusive.
 - Parallel fan-out (P4) only after G3 `APPROVED` — a non-DAG graph must not be
   parallelized.
 
+## Concurrency Contract (P4 component-level parallelism)
+
+Concurrency in this pipeline is deliberately scoped to **P4, per component**. The
+rest of the flow (P1→P2→G3→G5) is sequential because each gate must clear before
+the next phase. P0 research may fan out read-only exploration agents, but that is
+auxiliary, not main-flow parallelism.
+
+### Preconditions (all must hold before any fan-out)
+1. G3 verdict is `APPROVED` (the component graph is a proven DAG — no cycles).
+2. Boundaries between the components to be parallelized are **full/one-dim**
+   (interface + DTO), not shared mutable code. Facade-only seams stay sequential.
+3. `main`/composition root is NOT parallelized — it is wired once, sequentially,
+   after all components are green.
+
+### Scheduling rules
+- Respect the component edges: only dispatch a component once every component it
+  depends on is `DONE`. Start from leaf components (in-degree satisfied first).
+- Within one component, layers stay inside-out sequential (entities → use cases →
+  adapters); parallelism is *across* components, never *within* a layer chain.
+- **Max concurrency**: default `min(4, ready_components)`. Expose as a
+  `max_parallel` config; never exceed it so logs/worktrees stay legible.
+- One **Autopilot Implementer** per component task; each reports the 4-state status
+  (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED).
+
+### Isolation (git worktrees)
+- Each parallel component runs in its own worktree via `using-git-worktrees`.
+- Worktree/branch naming: `p4/<task-slug>/<component-name>` so it maps 1:1 to the
+  `.cc-skill/<task-slug>/` run and to the component in the graph.
+- Merge order at join: topological (dependency order), one at a time, re-running
+  the component's unit tests after each merge. Reclaim (remove) each worktree only
+  after its merge is verified. Never force-merge; a conflict escalates to the USER
+  LOOP.
+
+### Logging & rollback (append to .cc-skill/<task-slug>/run.jsonl)
+- On dispatch: `{event:"agent_dispatch", phase:"P4", detail:{component, worktree,
+  parallel_group_id}}`.
+- On finish: `{event:"phase_exit", detail:{component, status}}` with the 4-state.
+- If any component returns `BLOCKED`/`FAIL`: log `{event:"error", detail:{component,
+  cause}}`, then **quarantine** that component's worktree (do not merge it) while
+  letting sibling components that don't depend on it continue. Route the blocked
+  component to `systematic-debugging`; if it can't clear, roll it back (discard the
+  worktree, keep the branch for inspection) and surface it at G5 as a mandatory
+  follow-up — never merge a red component to make the group "look done".
+- A `parallel_group_id` ties sibling tasks together so `process-tuning` can later
+  measure fan-out width vs. wall-clock savings.
+
+### Determinism note
+Parallel execution must not change the final result vs. a sequential run — because
+components are DAG-independent, only wall-clock differs. If a parallel run produces
+a different outcome than sequential, that is a hidden shared-state defect (a missed
+boundary) — log a `conflict_logged` and send the design back to P2.
+
 ## Orchestrator Output (running log)
 
 ```
