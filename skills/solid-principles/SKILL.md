@@ -1,7 +1,7 @@
 ---
 name: solid-principles
 description: Applies the five SOLID class-design principles (SRP, OCP, LSP, ISP, DIP) from Robert C. Martin's Clean Architecture. Use when designing or reviewing class/module structure, deciding where to place responsibilities, choosing interfaces, or resolving rigidity/fragility smells. Language-agnostic.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # SOLID Principles (Class-Level Design)

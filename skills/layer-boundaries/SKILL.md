@@ -1,7 +1,7 @@
 ---
 name: layer-boundaries
 description: Defines the four Clean Architecture layers (Entities, Use Cases, Interface Adapters, Frameworks & Drivers), what belongs in each, the data structures that cross boundaries, and how to draw partial/full boundaries at the right cost. Use when scaffolding a project layout, deciding boundary granularity, or designing the interfaces that separate policy from detail. Language-agnostic.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Layers & Boundaries

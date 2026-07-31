@@ -1,5 +1,6 @@
 ---
 name: architecture-reviewer
+version: 1.1.0
 description: Phase 5 gate agent. Runs the full Clean Architecture review checklist against the implemented design/code and returns a severity-ranked verdict (PASS / PASS_WITH_CONCERNS / FAIL). The final quality gate before acceptance or merge.
 skills: [architecture-review-checklist, solid-principles, component-principles, dependency-rule]
 phase: 5

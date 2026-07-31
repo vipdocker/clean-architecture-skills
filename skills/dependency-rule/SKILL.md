@@ -1,7 +1,7 @@
 ---
 name: dependency-rule
 description: Enforces Clean Architecture's central Dependency Rule — source-code dependencies must point only inward, toward higher-level policy. Use when placing a class in a layer, deciding which way an import/reference may point, designing how control crosses a boundary (DIP + Humble Object), or auditing for outward-pointing dependencies. Language-agnostic.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # The Dependency Rule

@@ -1,5 +1,6 @@
 ---
 name: architecture-designer
+version: 1.1.0
 description: Phase 2 agent. Takes the Entities/Use Cases model and designs the layered structure — assigns each element to a layer, defines the ports and boundary DTOs, chooses boundary granularity, and produces a screaming directory layout plus a component map.
 skills: [layer-boundaries, component-principles, solid-principles]
 phase: 2
