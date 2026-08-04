@@ -30,6 +30,35 @@ Notes:
 """
 import argparse, json, os, sys, tempfile, time, datetime, re
 
+
+class CCLogError(Exception):
+    """Raised when logging cannot proceed. main() turns this into a clear stderr
+    message plus exit code 2, so the orchestrator can tell "log failed" apart
+    from "log written" instead of dying on a raw traceback mid-phase.
+
+    hint: remediation line shown only when it actually applies (e.g. an
+    unwritable target), so a JSON typo is never answered with a disk-path tip.
+    """
+
+    def __init__(self, msg, hint=None):
+        super().__init__(msg)
+        self.hint = hint
+
+
+FALLBACK_HINT = "set CC_SKILL_FALLBACK=<writable dir> and retry"
+
+
+def parse_json_arg(raw, flag):
+    """Parse a JSON CLI argument, naming the legal shape on failure so the caller
+    can self-correct without reading this source."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise CCLogError(
+            f"{flag} is not valid JSON ({e}). Expected a JSON object, e.g. "
+            f"{flag} '{{\"reason\":\"boundary ambiguous\",\"count\":2}}'")
+
+
 def now_iso():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -42,9 +71,16 @@ def resolve_dir(root, slug):
     base = os.path.join(root, ".cc-skill")
     try:
         os.makedirs(base, exist_ok=True)
-    except Exception:
+    except OSError as primary:
+        # <root> unwritable (read-only mount, missing parent, permissions):
+        # retry under the fallback root before giving up.
         base = os.path.join(os.environ.get("CC_SKILL_FALLBACK", "."), ".cc-skill")
-        os.makedirs(base, exist_ok=True)
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError as fallback:
+            raise CCLogError(
+                f"cannot create .cc-skill under {root} ({primary}) nor under "
+                f"fallback {base} ({fallback})", hint=FALLBACK_HINT)
     # collision handling: keep distinct runs
     d = os.path.join(base, slug)
     if os.path.exists(d) and os.environ.get("CC_LOG_NO_SUFFIX") != "1":
@@ -54,11 +90,20 @@ def resolve_dir(root, slug):
 
 def atomic_write(path, text):
     d = os.path.dirname(path)
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    tmp = None
+    try:
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)   # never leave a half-written .tmp behind
+            except OSError:
+                pass
+        raise CCLogError(f"cannot write {path}: {e}", hint=FALLBACK_HINT)
 
 def load_state(run_dir):
     p = os.path.join(run_dir, "state.json")
@@ -127,8 +172,12 @@ def next_seq(run_dir):
 
 def cmd_event(a):
     run_dir = _find_run_dir(a.root, a.slug)
-    os.makedirs(run_dir, exist_ok=True)
-    detail = json.loads(a.detail) if a.detail else {}
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+    except OSError as e:
+        raise CCLogError(f"cannot create run dir {run_dir}: {e}",
+                         hint=FALLBACK_HINT)
+    detail = parse_json_arg(a.detail, "--detail") if a.detail else {}
     rec = {"ts": now_iso(), "run_id": load_state(run_dir).get("run_id"),
            "seq": next_seq(run_dir), "phase": a.phase, "event": a.event,
            "agent": a.agent, "skills": a.skills.split(",") if a.skills else [],
@@ -140,19 +189,26 @@ def cmd_event(a):
     if a.status:
         st["phase_status"] = a.status
     if a.verdict and a.phase in ("G3", "G5"):
+        # state.json may be absent or partial after an interrupted run — rebuild
+        # the key rather than raising KeyError and blocking the gate.
+        st.setdefault("gate_verdicts", {"g3": None, "g5": None})
         st["gate_verdicts"]["g3" if a.phase == "G3" else "g5"] = a.verdict
     if a.event == "phase_exit" and a.phase not in st.get("completed_phases", []):
         st.setdefault("completed_phases", []).append(a.phase)
     st["updated_at"] = now_iso()
     atomic_write(os.path.join(run_dir, "state.json"),
                  json.dumps(st, ensure_ascii=False, indent=2))
-    with open(os.path.join(run_dir, "run.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        with open(os.path.join(run_dir, "run.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        raise CCLogError(f"cannot append run.jsonl in {run_dir}: {e}",
+                         hint=FALLBACK_HINT)
     print("logged seq", rec["seq"], "->", run_dir)
 
 def cmd_state(a):
     run_dir = _find_run_dir(a.root, a.slug)
-    st = json.loads(a.json)
+    st = parse_json_arg(a.json, "--json")
     st["updated_at"] = now_iso()
     atomic_write(os.path.join(run_dir, "state.json"),
                  json.dumps(st, ensure_ascii=False, indent=2))
@@ -160,14 +216,30 @@ def cmd_state(a):
 
 def cmd_summary(a):
     run_dir = _find_run_dir(a.root, a.slug)
-    body = open(a.body_file, encoding="utf-8").read() if a.body_file else "# Summary\n"
+    if a.body_file:
+        try:
+            with open(a.body_file, encoding="utf-8") as f:
+                body = f.read()
+        except FileNotFoundError:
+            raise CCLogError(
+                f"--body-file {a.body_file} not found. Write the summary markdown "
+                "first, or omit --body-file to emit a placeholder.")
+        except (PermissionError, UnicodeDecodeError) as e:
+            raise CCLogError(f"cannot read --body-file {a.body_file}: {e}")
+    else:
+        body = "# Summary\n"
     atomic_write(os.path.join(run_dir, "summary.md"), body)
-    # stamp manifest end
+    # stamp manifest end — a damaged manifest must not lose the summary itself
     mp = os.path.join(run_dir, "manifest.json")
     if os.path.exists(mp):
-        m = json.load(open(mp, encoding="utf-8"))
-        m["end"] = now_iso()
-        atomic_write(mp, json.dumps(m, ensure_ascii=False, indent=2))
+        try:
+            with open(mp, encoding="utf-8") as f:
+                m = json.load(f)
+            m["end"] = now_iso()
+            atomic_write(mp, json.dumps(m, ensure_ascii=False, indent=2))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"cc_log: WARNING manifest.json not stamped ({e}); "
+                  "summary.md was written", file=sys.stderr)
     print("summary written ->", run_dir)
 
 def main():
@@ -195,7 +267,16 @@ def main():
     pm.add_argument("--body-file", dest="body_file", default=None)
 
     a = p.parse_args()
-    a.fn(a)
+    try:
+        a.fn(a)
+    except CCLogError as e:
+        # Logging gates phase entry in this pipeline, so fail loudly with a fix
+        # hint instead of writing nothing silently.
+        print(f"cc_log: ERROR {e}", file=sys.stderr)
+        if e.hint:
+            print(f"cc_log: hint — {e.hint}.", file=sys.stderr)
+        sys.exit(2)
+
 
 if __name__ == "__main__":
     main()

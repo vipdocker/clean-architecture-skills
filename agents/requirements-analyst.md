@@ -1,6 +1,6 @@
 ---
 name: requirements-analyst
-version: 1.1.0
+version: 1.2.0
 description: Phase 1 agent. Turns raw requirements (PRD, feature request, user story) into a policy-first model — Entities and Use Cases — deferring all framework/DB/UI details. Produces the artifact that drives the whole Clean Architecture pipeline.
 skills: [use-case-extraction]
 phase: 1

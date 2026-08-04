@@ -1,8 +1,8 @@
 ---
 name: architecture-review-checklist
-description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic.
-version: 1.1.0
+description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use layer-boundaries), for the cheaper pre-code dependency-direction audit (use dependency-rule), or for judging whether the PROCESS itself needs tuning (use process-tuning).
 ---
+<!-- clean-architecture system v1.2.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 

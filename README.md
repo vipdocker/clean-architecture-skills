@@ -1,6 +1,6 @@
 # Clean Architecture Skill & Agent System
 
-**System version: 1.1.0** ｜ 所有 skill 与 agent 版本统一为 `1.1.0`
+**System version: 1.2.0** ｜ 所有 skill 与 agent 版本统一为 `1.2.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
@@ -155,7 +155,7 @@ clean-code/
 5. **阶段 5（门）**：用 `agents/architecture-reviewer.md` 跑完整清单。BLOCKER 必须清零；MAJOR 只能在你签字后作为技术债接受。
 
 ### 方式 C：迁移到真实 Skill 运行环境
-把 `skills/` 下每个目录（含 `SKILL.md`）拷到你的 agent skill 目录，把 `agents/` 映射为子 agent 定义，再按 `pipeline/orchestration.md` 的 DAG 编排即可。当前所有 SKILL.md 的 frontmatter 已符合标准格式（`name` / `description` / `version`）。
+把 `skills/` 下每个目录（含 `SKILL.md`）拷到你的 agent skill 目录，把 `agents/` 映射为子 agent 定义，再按 `pipeline/orchestration.md` 的 DAG 编排即可。当前所有 SKILL.md 的 frontmatter 严格只含 `name` / `description` 两个字段（符合 Anthropic Skill 编写规范），版本号以注释形式记在正文首行而不占 frontmatter；每个 `description` 均含正向触发词与负向排除（`Not for …`），用于拉开相邻 skill 之间的触发边界。
 
 ---
 

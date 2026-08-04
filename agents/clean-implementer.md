@@ -1,6 +1,6 @@
 ---
 name: clean-implementer
-version: 1.1.0
+version: 1.2.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Self-verifies each unit.
 skills: [dependency-rule, solid-principles, layer-boundaries]
 phase: 4
