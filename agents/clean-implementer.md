@@ -70,3 +70,16 @@ points outward.
   reporting the 4-state status.
 Augmentation is additive: never let a superpowers helper wire a concretion outside
 `main` or import outward to make a test pass.
+
+**If an augmentation above is not installed, do not stall.** Each one has a
+substitute that keeps its intent, and the orchestrator logs the gap as
+`superpower_unavailable`:
+- no TDD skill → still write the entity/use-case tests before the implementation,
+  with test doubles for every port; they must pass with no DB/UI/network.
+- no plan-execution skill → walk the P2 DAG serially in topological order.
+- no parallel/worktree skill → stay serial on the current branch; G3 already
+  proved the graph is acyclic, so only speed is lost, never correctness.
+- no debugging skill → name the suspected cause in one sentence, then confirm it
+  with a failing test or log line before editing code.
+- no verification skill → a layer is DONE only after its imports are checked
+  against the layer map AND its tests pass; keep the command output as evidence.

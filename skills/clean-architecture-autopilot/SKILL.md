@@ -80,12 +80,36 @@ Transition rules:
 For each phase: which role agent to dispatch, which local methodology skill to
 inject, and which **superpowers** skill(s)/agent(s) augment it.
 
+### Superpowers availability rule (applies to every phase below)
+
+A superpowers skill/agent is an **optional amplifier, never a prerequisite**.
+Environments differ in which ones are installed, so a missing augmentation must
+never stall a phase. When one named below cannot be invoked:
+
+1. Apply the **Fallback** line in that phase's entry. Each fallback preserves the
+   *intent* of the augmentation using only this skill's own instructions.
+2. Log it once so the gap becomes data rather than a silent degradation:
+   ```bash
+   python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
+     --phase P4 --event superpower_unavailable \
+     --detail '{"name":"test-driven-development","fallback":"applied"}'
+   ```
+   `process-tuning` reads these events to score augmentation ROI and to decide
+   which references to keep, promote, or drop.
+3. Never weaken a gate, skip a phase, or bend the Dependency Rule to compensate.
+
+Only a missing **local** methodology skill blocks a phase — those are the load
+bearing ones and they ship in this repo.
+
 ### P0 — Research (optional, only if working inside an existing codebase)
 - Local skill: —
 - Superpowers skill: `find-skills` (discover better-fit skills first), `context7`
   (fetch framework docs only when a tech is already fixed).
 - Superpowers agent: **Explore** ("very thorough" for import/dependency mapping),
   **Autopilot Researcher** (existing patterns, sibling naming, API conventions).
+- Fallback: without `find-skills`, pick candidates from the skill list already
+  injected in context; without `context7`, read the framework's own docs or
+  vendored source in-repo.
 - Exit: a `codebase_notes` artifact (existing layers, boundaries already present,
   naming conventions). Skip entirely for greenfield.
 
@@ -130,6 +154,23 @@ inject, and which **superpowers** skill(s)/agent(s) augment it.
   (evidence before claiming a layer done).
 - Superpowers agent: **Autopilot Implementer** (self-verifying single-task
   implementer with 4-state status), one per DAG task.
+- Fallback (this phase depends on the most augmentations, so each intent has an
+  explicit substitute):
+  - no `test-driven-development` → still write entity/use-case tests **before**
+    their implementation, injecting test doubles for every port. The proof that
+    the inner layers are isolated is that those tests run with no DB, UI, or
+    network.
+  - no `executing-plans` / `subagent-driven-development` → implement the P2 DAG
+    tasks serially in topological order, one component per step.
+  - no `dispatching-parallel-agents` / `using-git-worktrees` → stay serial on the
+    current branch. G3 already proved the graph is acyclic, so ordering alone
+    keeps this correct; only wall-clock is lost.
+  - no `systematic-debugging` / `investigate` → on any failure, state the suspected
+    cause in one sentence and confirm it with a failing test or a log line before
+    editing code.
+  - no `verification-before-completion` → a component counts as done only after
+    (a) its imports are checked against the layer map and (b) its tests pass;
+    record the command output as the evidence.
 - Exit artifact: `{files, tests, status, concerns, debts}` per component.
 
 ### G5 — Architecture Review (GATE)
@@ -294,8 +335,8 @@ Naming rules for `<task-slug>`:
 ```
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
   "event":"phase_enter|phase_exit|agent_dispatch|skill_inject|
-           superpower_used|gate_verdict|loop_increment|user_loop|
-           conflict_logged|artifact_written|error",
+           superpower_used|superpower_unavailable|gate_verdict|loop_increment|
+           user_loop|conflict_logged|artifact_written|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -304,13 +345,17 @@ Rules:
 - Emit `phase_enter`/`phase_exit` around every phase; `gate_verdict` at each gate;
   `loop_increment` whenever `gate3/5_iterations` rises; `user_loop` on every pause;
   `conflict_logged` whenever a superpowers suggestion is overridden by the
-  Dependency Rule.
+  Dependency Rule; `superpower_unavailable` (with `detail.name` and
+  `detail.fallback`) whenever a named augmentation cannot be invoked and its
+  fallback is applied instead.
 - Never mutate a prior line — the log is append-only (use `>>`, not rewrite).
 - Redact secrets: never write API keys/tokens/passwords into the log or artifacts.
 
 ### summary.md (written at DONE — the tuning artifact)
 Must include: final verdicts; `gate3_iterations` / `gate5_iterations` (how many
-rounds each gate needed); the list of superpowers actually used vs skipped; all
+rounds each gate needed); the list of superpowers actually used vs skipped vs
+**unavailable** (the last group is an environment gap, not a judgement call — keep
+it separate so tuning does not mistake "never fired" for "no value"); all
 `debts` accepted with sign-off; all `open_questions` and how they were resolved;
 per-phase wall-clock; and a short "what to tune next time" note (e.g. a gate that
 looped repeatedly signals an ambiguous boundary upstream).

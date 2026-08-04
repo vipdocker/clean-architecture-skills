@@ -61,9 +61,20 @@ Rank phases by how often they were re-entered (from `phase_enter` counts, or git
 churn in degraded mode). The most re-entered phase is the top tuning target.
 
 ### D. Superpowers ROI
-From `superpower_used` events (or absence): which augmentations fired, and did the
-run improve because of them? Never-fired or no-signal superpowers → candidate to
-**drop** for this project profile. Frequently-decisive ones → keep/promote.
+Read both `superpower_used` and `superpower_unavailable` events, and keep the three
+cases apart — conflating them produces the wrong recommendation:
+
+| Evidence | Meaning | Recommendation |
+|---|---|---|
+| fired, and the run visibly improved | earning its keep | **keep** / **promote** |
+| fired, no signal either way | ceremony | **drop** for this project profile |
+| `superpower_unavailable` logged | environment gap, **not** a value judgement | **install** it, or promote its fallback to the default and stop naming it |
+| never mentioned at all | never reached that phase | insufficient evidence — say so |
+
+The trap to avoid: reading "never fired" as "worthless". A skill that was never
+installed cannot have produced signal, so deleting the reference on that basis
+throws away an untested idea. Only a skill that *ran* and changed nothing earns a
+drop.
 
 ### E. Cost / latency
 Per-phase wall-clock (`duration_ms`) and any premium-model routing. Phases that
@@ -79,7 +90,8 @@ model.
   gates: [{gate, iterations, escapes[], false_stops[],
            verdict: well_calibrated|too_loose|too_strict, fix}],
   rework_hotspots: [{phase, reentry_count, likely_root_cause, confidence}],
-  superpowers_roi: [{name, fired, decisive, recommendation: keep|drop|promote}],
+  superpowers_roi: [{name, status: fired|unavailable|not_reached, decisive,
+                     recommendation: keep|drop|promote|install|promote_fallback}],
   cost: [{phase, wall_clock, recommendation}],
   top_3_tuning_actions: [ "..." ],   // ranked, concrete, each tied to evidence
   confidence_note                     // states which findings are low-confidence
