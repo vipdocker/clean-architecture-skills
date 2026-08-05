@@ -56,9 +56,29 @@ For each gate G3 / G5:
 - false stops: REVISE/FAIL later overturned with no change → the gate is **too
   strict**; relax the anchor.
 
+**Do not read `iterations: 0` as "well calibrated" before checking the order.**
+A gate that ran *after* the work it was supposed to guard also shows 0 loops.
+Compare the `seq` of the `gate_verdict` against the first `phase_enter` /
+`component_done` of the phase it gates, and look for `process_violation` events.
+If the gate ran late, split the finding in two — they have opposite fixes:
+
+| Question | Evidence | If bad, fix |
+|---|---|---|
+| Did the gate **judge** correctly? | re-verify its claims against the code (B.A) | tighten the checklist |
+| Did the gate **run at the right time**? | `seq` order + `process_violation` | tighten the latch, leave the checklist alone |
+
+A gate whose judgement is sound but whose timing was bypassed needs a mechanical
+precondition, not a stricter rubric. Tightening the rubric there is pure waste.
+
 ### C. Rework hotspots
 Rank phases by how often they were re-entered (from `phase_enter` counts, or git
 churn in degraded mode). The most re-entered phase is the top tuning target.
+
+Count **`phase_enter`**, never `phase_exit`. P4 legitimately emits many
+`component_done` events under a single entry; older logs sometimes used
+`phase_exit` per component, which inflates apparent re-entry. If `phase_exit`
+outnumbers `phase_enter` for a phase, treat the extras as component progress and
+say the log predates the `component_done` convention.
 
 ### D. Superpowers ROI
 Read both `superpower_used` and `superpower_unavailable` events, and keep the three
@@ -69,6 +89,7 @@ cases apart — conflating them produces the wrong recommendation:
 | fired, and the run visibly improved | earning its keep | **keep** / **promote** |
 | fired, no signal either way | ceremony | **drop** for this project profile |
 | `superpower_unavailable` logged | environment gap, **not** a value judgement | **install** it, or promote its fallback to the default and stop naming it |
+| `fallback: partial` logged | the substitute only covered part of the intent | **install** it — the uncovered half is a real evidence gap, not a solved problem |
 | never mentioned at all | never reached that phase | insufficient evidence — say so |
 
 The trap to avoid: reading "never fired" as "worthless". A skill that was never

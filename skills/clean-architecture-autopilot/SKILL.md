@@ -50,6 +50,27 @@ logged. If `.cc-skill/<slug>/` does not exist when you reach P1, STOP and run
 `init` first. Snapshots of each phase's exit artifact go under
 `.cc-skill/<slug>/artifacts/` (write them with your normal file tools).
 
+**The latch is now mechanical, not just prose.** `cc_log.py event` refuses to
+record `phase_enter P4` while `gate_verdicts.g3` is null (same for P6/G5) and
+exits 2 without writing anything. A deliberate bypass needs `--force`, which
+appends a MAJOR `process_violation` event plus a `debts` entry before the
+`phase_enter` — so skipping a gate is possible but never silent. This exists
+because the first production run entered P4 with `g3` still null and it surfaced
+only when the user thought to ask.
+
+### If `cc_log.py` itself cannot run (fallback — this happens)
+
+The script needs a working shell. When the shell is unavailable, **hand-write the
+same files with your normal file tools** rather than skipping the log:
+
+1. First, append one `superpower_unavailable` event naming `scripts/cc_log.py`.
+2. `run.jsonl` — append-only. Never edit or reorder an existing line; keep `seq`
+   monotonic by reading the last line first.
+3. `state.json` — rewrite the whole file each time.
+4. **You now own the latch the script would have enforced**: before writing
+   `phase_enter P4`, read `gate_verdicts.g3`; if it is null, write the
+   `process_violation` event yourself instead of quietly proceeding.
+
 ---
 
 ## State Machine
@@ -334,9 +355,9 @@ Naming rules for `<task-slug>`:
 ### run.jsonl event schema (append one line per event)
 ```
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
-  "event":"phase_enter|phase_exit|agent_dispatch|skill_inject|
+  "event":"phase_enter|phase_exit|component_done|agent_dispatch|skill_inject|
            superpower_used|superpower_unavailable|gate_verdict|loop_increment|
-           user_loop|conflict_logged|artifact_written|error",
+           user_loop|conflict_logged|process_violation|artifact_written|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -348,6 +369,18 @@ Rules:
   Dependency Rule; `superpower_unavailable` (with `detail.name` and
   `detail.fallback`) whenever a named augmentation cannot be invoked and its
   fallback is applied instead.
+- **`component_done`, not `phase_exit`, for each P4 component.** P4 implements many
+  components under one `phase_enter`; reusing `phase_exit` per component makes the
+  log look like repeated re-entry and destroys rework analysis.
+- **`process_violation` for a broken process rule** — a skipped gate, an
+  out-of-order phase, tests written after the code. Do NOT file these under
+  `error`, which is for environment failures and retracted findings; mixing them
+  makes both uncountable.
+- `detail.fallback` is one of `applied` | `partial` | `none`. Use **`partial`**
+  when only some of the augmentation's intent could be substituted (e.g. import
+  checks done, but test evidence unobtainable) — and say which half is missing.
+- When one root cause disables several augmentations at once, use
+  `detail.names: [...]` instead of `detail.name`.
 - Never mutate a prior line — the log is append-only (use `>>`, not rewrite).
 - Redact secrets: never write API keys/tokens/passwords into the log or artifacts.
 

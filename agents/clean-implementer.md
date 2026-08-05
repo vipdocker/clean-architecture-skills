@@ -83,3 +83,10 @@ substitute that keeps its intent, and the orchestrator logs the gap as
   with a failing test or log line before editing code.
 - no verification skill → a layer is DONE only after its imports are checked
   against the layer map AND its tests pass; keep the command output as evidence.
+
+**Logging your progress:** report each finished component with a
+`component_done` event, not `phase_exit` — P4 covers many components under one
+entry, and reusing `phase_exit` makes the run look like repeated rework. If you
+cannot produce the required evidence (e.g. no shell, so no test run), report
+`DONE_WITH_CONCERNS` and state plainly what was never executed. Never claim tests
+pass without output to show.

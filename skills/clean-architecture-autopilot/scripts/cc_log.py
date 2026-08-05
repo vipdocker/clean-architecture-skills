@@ -47,6 +47,13 @@ class CCLogError(Exception):
 
 FALLBACK_HINT = "set CC_SKILL_FALLBACK=<writable dir> and retry"
 
+# The mechanical half of the SKILL.md enforcement rule: entering these phases
+# requires the named gate to already carry a verdict. Derived from a real
+# failure — the first production run entered P4 while gate_verdicts.g3 was still
+# null, and nobody noticed until the user happened to ask. Prose did not hold,
+# so the writer refuses the transition instead.
+PHASE_GATE_PREREQ = {"P4": "g3", "P6": "g5"}
+
 
 def parse_json_arg(raw, flag):
     """Parse a JSON CLI argument, naming the legal shape on failure so the caller
@@ -170,6 +177,24 @@ def next_seq(run_dir):
             n += 1
     return n
 
+def _append_jsonl(run_dir, rec):
+    """Append one event. Never rewrites prior lines."""
+    try:
+        with open(os.path.join(run_dir, "run.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        raise CCLogError(f"cannot append run.jsonl in {run_dir}: {e}",
+                         hint=FALLBACK_HINT)
+
+
+def _event_rec(run_id, seq, phase, event, detail, agent=None, skills=None,
+               superpowers=None, verdict=None, duration_ms=None):
+    return {"ts": now_iso(), "run_id": run_id, "seq": seq, "phase": phase,
+            "event": event, "agent": agent, "skills": skills or [],
+            "superpowers": superpowers or [], "verdict": verdict,
+            "detail": detail or {}, "duration_ms": duration_ms}
+
+
 def cmd_event(a):
     run_dir = _find_run_dir(a.root, a.slug)
     try:
@@ -178,13 +203,42 @@ def cmd_event(a):
         raise CCLogError(f"cannot create run dir {run_dir}: {e}",
                          hint=FALLBACK_HINT)
     detail = parse_json_arg(a.detail, "--detail") if a.detail else {}
-    rec = {"ts": now_iso(), "run_id": load_state(run_dir).get("run_id"),
-           "seq": next_seq(run_dir), "phase": a.phase, "event": a.event,
-           "agent": a.agent, "skills": a.skills.split(",") if a.skills else [],
-           "superpowers": a.superpowers.split(",") if a.superpowers else [],
-           "verdict": a.verdict, "detail": detail, "duration_ms": a.duration_ms}
-    # state.json is written FIRST (current truth), then the append (history)
     st = load_state(run_dir)
+
+    # --- gate latch -------------------------------------------------------
+    # Refuse to record entry into a gated phase before its gate has spoken.
+    # A deliberate bypass needs --force and leaves a permanent process_violation.
+    gate = PHASE_GATE_PREREQ.get(a.phase) if a.event == "phase_enter" else None
+    bypassed = False
+    if gate and not (st.get("gate_verdicts") or {}).get(gate):
+        if not a.force:
+            raise CCLogError(
+                f"refusing to log phase_enter {a.phase}: gate_verdicts.{gate} is "
+                f"still null. Run the {gate.upper()} gate and log its "
+                f"gate_verdict first. If the bypass is intentional, re-run with "
+                f"--force — that records a MAJOR process_violation.")
+        bypassed = True
+
+    seq = next_seq(run_dir)
+    if bypassed:
+        _append_jsonl(run_dir, _event_rec(
+            st.get("run_id"), seq, a.phase, "process_violation",
+            {"severity": "MAJOR",
+             "rule": f"{a.phase} may only be entered after {gate.upper()} "
+                     f"records a gate_verdict",
+             "actual": f"gate_verdicts.{gate} was null at phase_enter",
+             "bypass": "--force"}))
+        st.setdefault("debts", []).append(
+            f"[process] {a.phase} entered with {gate.upper()} unresolved "
+            f"(--force bypass, logged at seq {seq})")
+        seq += 1
+
+    rec = _event_rec(st.get("run_id"), seq, a.phase, a.event, detail,
+                     agent=a.agent,
+                     skills=a.skills.split(",") if a.skills else [],
+                     superpowers=a.superpowers.split(",") if a.superpowers else [],
+                     verdict=a.verdict, duration_ms=a.duration_ms)
+    # state.json is written FIRST (current truth), then the append (history)
     st["current_phase"] = a.phase
     if a.status:
         st["phase_status"] = a.status
@@ -198,12 +252,7 @@ def cmd_event(a):
     st["updated_at"] = now_iso()
     atomic_write(os.path.join(run_dir, "state.json"),
                  json.dumps(st, ensure_ascii=False, indent=2))
-    try:
-        with open(os.path.join(run_dir, "run.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError as e:
-        raise CCLogError(f"cannot append run.jsonl in {run_dir}: {e}",
-                         hint=FALLBACK_HINT)
+    _append_jsonl(run_dir, rec)
     print("logged seq", rec["seq"], "->", run_dir)
 
 def cmd_state(a):
@@ -257,6 +306,8 @@ def main():
     pe.add_argument("--superpowers", default=""); pe.add_argument("--verdict", default=None)
     pe.add_argument("--status", default=None); pe.add_argument("--detail", default="")
     pe.add_argument("--duration-ms", dest="duration_ms", type=int, default=None)
+    pe.add_argument("--force", action="store_true",
+                    help="bypass the gate latch; logs a MAJOR process_violation")
 
     ps = sub.add_parser("state"); ps.set_defaults(fn=cmd_state)
     ps.add_argument("--root", required=True); ps.add_argument("--slug", required=True)
