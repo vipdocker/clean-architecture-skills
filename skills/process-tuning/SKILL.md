@@ -2,7 +2,7 @@
 name: process-tuning
 description: Analyzes a completed Clean Architecture Autopilot run to decide whether the PROCESS itself needs tuning. Takes a finished project directory (required) plus its .cc-skill/ run logs (optional but strongly preferred) and produces a tuning report — gate effectiveness scores, rework hotspots, superpowers ROI, per-phase cost, and concrete "tune this next" recommendations. Use when the user hands over a done project (and/or its logs) and asks "does the pipeline need tuning / optimizing?". Not for judging whether the produced CODE is good (use architecture-review-checklist), nor for driving a new build (use clean-architecture-autopilot).
 ---
-<!-- clean-architecture system v1.2.0 -->
+<!-- clean-architecture system v1.3.0 -->
 
 # Process Tuning (Pipeline Retrospective & Optimizer)
 
@@ -69,6 +69,11 @@ If the gate ran late, split the finding in two — they have opposite fixes:
 
 A gate whose judgement is sound but whose timing was bypassed needs a mechanical
 precondition, not a stricter rubric. Tightening the rubric there is pure waste.
+
+Also check **verdict freshness**: a `phase_enter P4` after a `g5` verdict (or
+`P2` after `g3`) should be followed by a `gate_invalidated` event and, later, a
+fresh verdict. A run that ends on a verdict older than the last re-entry shipped
+unreviewed work — same defect class as a skipped gate, one level subtler.
 
 ### C. Rework hotspots
 Rank phases by how often they were re-entered (from `phase_enter` counts, or git

@@ -2,7 +2,7 @@
 name: solid-principles
 description: Applies the five SOLID class-design principles (SRP, OCP, LSP, ISP, DIP) from Robert C. Martin's Clean Architecture. Use when designing or reviewing class/module structure, deciding where to place responsibilities, choosing interfaces, or resolving rigidity/fragility smells. Language-agnostic. Not for component/package-level cohesion and coupling (use component-principles), for cross-layer dependency direction (use dependency-rule), or for assigning code to the four layers (use layer-boundaries).
 ---
-<!-- clean-architecture system v1.2.0 -->
+<!-- clean-architecture system v1.3.0 -->
 
 # SOLID Principles (Class-Level Design)
 

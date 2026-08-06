@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.2.0 -->
+<!-- clean-architecture system v1.3.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -51,12 +51,20 @@ logged. If `.cc-skill/<slug>/` does not exist when you reach P1, STOP and run
 `.cc-skill/<slug>/artifacts/` (write them with your normal file tools).
 
 **The latch is now mechanical, not just prose.** `cc_log.py event` refuses to
-record `phase_enter P4` while `gate_verdicts.g3` is null (same for P6/G5) and
+record `phase_enter P4` unless `gate_verdicts.g3` is `APPROVED` (P6 likewise
+needs a passing `g5`; a recorded REVISE/FAIL does **not** open the gate) and
 exits 2 without writing anything. A deliberate bypass needs `--force`, which
 appends a MAJOR `process_violation` event plus a `debts` entry before the
 `phase_enter` — so skipping a gate is possible but never silent. This exists
 because the first production run entered P4 with `g3` still null and it surfaced
 only when the user thought to ask.
+
+**Gate verdicts go stale.** Re-entering P2 voids `g3`; re-entering P4 voids `g5`
+(the work the verdict certified is about to change). `cc_log.py` does this
+automatically and logs a `gate_invalidated` event — the next gated phase then
+demands a fresh verdict. From run 2: P4 was re-entered after G5 passed, the
+promised delta review never happened, and P6 closed on a verdict that predated
+~2300 new lines.
 
 ### If `cc_log.py` itself cannot run (fallback — this happens)
 
@@ -152,11 +160,26 @@ bearing ones and they ship in this repo.
 - Superpowers agent: **Plan** (software-architect plan), **Autopilot Designer** /
   **Autopilot Planner** (produce DAG task plan with per-task model routing).
 - Exit artifact: `{layer_map, ports, boundary_dtos, boundary_choices,
-  component_map, directory_tree, design_doc}`.
+  component_map, directory_tree, design_doc}`. When the design decomposes into
+  DAG tasks, each task must also declare `files_touched[]` — run 2 hit a
+  parallel write conflict and a stale cross-wave assignment (both MAJOR-adjacent)
+  because dispatch had no touch-sets to check overlap against.
 
 ### G3 — Dependency Rule Audit (GATE)
 - Role agent: `agents/dependency-auditor.md`
 - Local skills: `dependency-rule`, `component-principles`
+- Bundled tool (EXECUTABLE): `scripts/dep_graph.py` — AST import graph + Tarjan
+  SCC scan. Runs 1 and 2 each rewrote this from scratch (~500 lines per run);
+  use the bundled one and spend the effort judging the graph instead:
+  ```bash
+  python3 .../scripts/dep_graph.py --root "<project_dir>" \
+    --scan-dirs modules --root-files app.py,main.py \
+    --focus <new_component_prefix> --json .cc-skill/<slug>/g3-graph.json
+  ```
+  It sees inline/function-level imports (run 2's V2 hid there — line-start grep
+  misses them) and root-level composition files (V6's hiding spot). Exit 1 when
+  the focused component sits in any cycle. Layer direction judgement remains the
+  auditor's — the tool reports edges, it does not know the layer map.
 - Superpowers skill: **`ast-code-analysis-superpower`** (ast-grep structural rules
   to mechanically detect outward imports / layer-boundary violations / cycles —
   turns the audit from eyeballing into a repeatable scan).
@@ -173,6 +196,10 @@ bearing ones and they ship in this repo.
   parallel component work), **`systematic-debugging`** / **`investigate`** (root-cause
   on any failure, no fixes without a cause), **`verification-before-completion`**
   (evidence before claiming a layer done).
+- Parallel dispatch rule: before fanning out a wave, intersect the
+  `files_touched[]` of its tasks pairwise. Tasks sharing any file go to one
+  agent (or run serially) — and a task must not be dispatched if an earlier
+  wave already modified its files without folding those changes in.
 - Superpowers agent: **Autopilot Implementer** (self-verifying single-task
   implementer with 4-state status), one per DAG task.
 - Fallback (this phase depends on the most augmentations, so each intent has an
@@ -356,8 +383,9 @@ Naming rules for `<task-slug>`:
 ```
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
   "event":"phase_enter|phase_exit|component_done|agent_dispatch|skill_inject|
-           superpower_used|superpower_unavailable|gate_verdict|loop_increment|
-           user_loop|conflict_logged|process_violation|artifact_written|error",
+           superpower_used|superpower_unavailable|gate_verdict|gate_invalidated|
+           loop_increment|user_loop|conflict_logged|process_violation|
+           artifact_written|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -381,6 +409,12 @@ Rules:
   checks done, but test evidence unobtainable) — and say which half is missing.
 - When one root cause disables several augmentations at once, use
   `detail.names: [...]` instead of `detail.name`.
+- **Log `phase_enter` when the work starts, never as a batch at completion.**
+  Run 2 wrote enter+exit together at phase end, so every phase's wall-clock
+  landed in its predecessor's gap and the cost analysis was off by one phase.
+  `phase_exit` auto-fills `duration_ms` from the matching enter — but only if
+  the enter was honest. If work pauses >30 min with no events, add a `user_loop`
+  (or an `error` naming the blocker) so idle time is attributable.
 - Never mutate a prior line — the log is append-only (use `>>`, not rewrite).
 - Redact secrets: never write API keys/tokens/passwords into the log or artifacts.
 

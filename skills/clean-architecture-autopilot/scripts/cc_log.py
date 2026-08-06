@@ -54,6 +54,16 @@ FALLBACK_HINT = "set CC_SKILL_FALLBACK=<writable dir> and retry"
 # so the writer refuses the transition instead.
 PHASE_GATE_PREREQ = {"P4": "g3", "P6": "g5"}
 
+# Only these verdicts open the gate. Run 2 review found the latch accepted any
+# non-null verdict — so a recorded REVISE_REQUIRED would have let P4 through.
+GATE_PASSING = {"g3": {"APPROVED"}, "g5": {"PASS", "PASS_WITH_CONCERNS"}}
+
+# Re-entering these phases makes the named gate's verdict stale: the work that
+# verdict certified is about to change. From run 2 — P4 was re-entered after G5
+# passed, the promised delta review never happened, and P6 sailed through on a
+# verdict that predated ~2300 new lines.
+PHASE_INVALIDATES = {"P2": "g3", "P4": "g5"}
+
 
 def parse_json_arg(raw, flag):
     """Parse a JSON CLI argument, naming the legal shape on failure so the caller
@@ -177,6 +187,31 @@ def next_seq(run_dir):
             n += 1
     return n
 
+def _elapsed_ms_since_enter(run_dir, phase):
+    """Wall-clock since this phase's latest phase_enter, used to auto-fill
+    duration_ms on phase_exit. Both real runs left duration_ms empty on all
+    events, so the cost section of process-tuning had nothing to work with.
+    Returns None when no matching enter exists (degraded logs)."""
+    p = os.path.join(run_dir, "run.jsonl")
+    if not os.path.exists(p):
+        return None
+    ts = None
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("phase") == phase and r.get("event") == "phase_enter":
+                ts = r.get("ts")
+    if not ts:
+        return None
+    try:
+        then = datetime.datetime.fromisoformat(ts)
+        return int((datetime.datetime.now().astimezone() - then).total_seconds() * 1000)
+    except ValueError:
+        return None
+
 def _append_jsonl(run_dir, rec):
     """Append one event. Never rewrites prior lines."""
     try:
@@ -206,20 +241,41 @@ def cmd_event(a):
     st = load_state(run_dir)
 
     # --- gate latch -------------------------------------------------------
-    # Refuse to record entry into a gated phase before its gate has spoken.
+    # Refuse to record entry into a gated phase before its gate has spoken
+    # with a PASSING verdict (a recorded REVISE/FAIL does not open the gate).
     # A deliberate bypass needs --force and leaves a permanent process_violation.
     gate = PHASE_GATE_PREREQ.get(a.phase) if a.event == "phase_enter" else None
     bypassed = False
-    if gate and not (st.get("gate_verdicts") or {}).get(gate):
-        if not a.force:
-            raise CCLogError(
-                f"refusing to log phase_enter {a.phase}: gate_verdicts.{gate} is "
-                f"still null. Run the {gate.upper()} gate and log its "
-                f"gate_verdict first. If the bypass is intentional, re-run with "
-                f"--force — that records a MAJOR process_violation.")
-        bypassed = True
+    if gate:
+        current = (st.get("gate_verdicts") or {}).get(gate)
+        if current not in GATE_PASSING[gate]:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_enter {a.phase}: gate_verdicts.{gate} "
+                    f"is {current!r}, but {a.phase} requires one of "
+                    f"{sorted(GATE_PASSING[gate])}. Run the {gate.upper()} gate "
+                    f"and log its gate_verdict first. If the bypass is "
+                    f"intentional, re-run with --force — that records a MAJOR "
+                    f"process_violation.")
+            bypassed = True
 
     seq = next_seq(run_dir)
+
+    # --- gate staleness ---------------------------------------------------
+    # Re-entering P2/P4 voids the downstream verdict so the next latch check
+    # demands a fresh one. Logged, never silent.
+    stale = PHASE_INVALIDATES.get(a.phase) if a.event == "phase_enter" else None
+    if stale and (st.get("gate_verdicts") or {}).get(stale):
+        was = st["gate_verdicts"][stale]
+        _append_jsonl(run_dir, _event_rec(
+            st.get("run_id"), seq, a.phase, "gate_invalidated",
+            {"gate": stale, "was": was,
+             "reason": f"re-entering {a.phase} changes what {stale.upper()} "
+                       f"certified; a fresh verdict is required before the "
+                       f"next gated phase"}))
+        st["gate_verdicts"][stale] = None
+        seq += 1
+
     if bypassed:
         _append_jsonl(run_dir, _event_rec(
             st.get("run_id"), seq, a.phase, "process_violation",
@@ -237,7 +293,10 @@ def cmd_event(a):
                      agent=a.agent,
                      skills=a.skills.split(",") if a.skills else [],
                      superpowers=a.superpowers.split(",") if a.superpowers else [],
-                     verdict=a.verdict, duration_ms=a.duration_ms)
+                     verdict=a.verdict,
+                     duration_ms=(a.duration_ms if a.duration_ms is not None
+                                  or a.event != "phase_exit"
+                                  else _elapsed_ms_since_enter(run_dir, a.phase)))
     # state.json is written FIRST (current truth), then the append (history)
     st["current_phase"] = a.phase
     if a.status:

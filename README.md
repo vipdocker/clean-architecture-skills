@@ -1,6 +1,6 @@
 # Clean Architecture Skill & Agent System
 
-**System version: 1.2.0** ｜ 所有 skill 与 agent 版本统一为 `1.2.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
+**System version: 1.3.0** ｜ 所有 skill 与 agent 版本统一为 `1.3.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
