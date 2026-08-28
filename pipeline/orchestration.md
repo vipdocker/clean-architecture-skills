@@ -28,7 +28,8 @@ right station. The design mirrors a harness pattern: **plan → gate → build �
           ┌──────────────────────┐
           │ 4. Clean Implementer  │  skills: dependency-rule,
           │  (per layer,          │          solid-principles, layer-boundaries
-          │   inside-out)         │
+          │   inside-out,         │          (batched Red-Green TDD,
+          │   batched TDD)        │           cross-layer deduplication)
           └───────────┬──────────┘
                       │ files[], tests[], status
                       ▼
@@ -46,17 +47,21 @@ right station. The design mirrors a harness pattern: **plan → gate → build �
 - **Gate 3 (pre-implementation)** — Dependency Auditor. Cheap to run, catches the
   most expensive class of defect (wrong dependency direction / cycles) *before* any
   code is written. `REVISE_REQUIRED` loops back to Phase 2.
-- **Gate 5 (pre-acceptance)** — Architecture Reviewer. Full checklist. `FAIL` routes
-  BLOCKERs back to Implementer (code) or Designer (structure); `PASS_WITH_CONCERNS`
-  accepts with mandatory follow-ups logged.
+- **Gate 5 (pre-acceptance)** — Architecture Reviewer. Full checklist on first pass;
+  **delta review** (only changed components/layers) on subsequent passes after
+  targeted fixes. `FAIL` routes BLOCKERs back to the **specific component/layer** in
+  Implementer (code) or Designer (structure) via precise scope routing;
+  `PASS_WITH_CONCERNS` accepts with mandatory follow-ups logged.
 
 ## Feedback Loops (bounded)
 
 - Gate 3 ⇄ Designer: cap at 2 iterations; if still failing, escalate an
   `open_question` to the user (the axis of change or a boundary may be genuinely
   ambiguous).
-- Gate 5 ⇄ Implementer/Designer: BLOCKERs must clear before accept; MAJORs may be
-  accepted as tracked debt only with user sign-off.
+- Gate 5 ⇄ Implementer/Designer: BLOCKERs must clear before accept; fixes are
+  routed to the **precise component/layer** (not the entire phase); G5 re-runs as
+  a **delta review** covering only the fixed scope. MAJORs may be accepted as
+  tracked debt only with user sign-off.
 
 ## When to Enter the User Loop
 
@@ -112,8 +117,8 @@ rigor but never overrides the Dependency Rule or the local methodology skills.
 | P1 requirements | requirements-analyst | use-case-extraction | brainstorming, feature-spec | general-purpose |
 | P2 design | architecture-designer | layer-boundaries, component-principles, solid-principles | writing-plans, plan-eng-review | Plan, Autopilot Designer/Planner |
 | G3 dep audit | dependency-auditor | dependency-rule, component-principles | ast-code-analysis-superpower | Explore |
-| P4 implement | clean-implementer | dependency-rule, solid-principles, layer-boundaries | test-driven-development, executing-plans, subagent-driven-development, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
-| G5 review | architecture-reviewer | architecture-review-checklist (+3) | requesting-code-review, ast-code-analysis-superpower, codex, review | Autopilot Code Reviewer |
+| P4 implement | clean-implementer | dependency-rule, solid-principles, layer-boundaries | test-driven-development (batched Red-Green + dedup), executing-plans, subagent-driven-development, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
+| G5 review (delta on re-run) | architecture-reviewer | architecture-review-checklist (+3) | requesting-code-review, ast-code-analysis-superpower, codex, review | Autopilot Code Reviewer |
 | P6 finish | — | — | receiving-code-review, finishing-a-development-branch, ship | — |
 
 Conflict rule: if a superpowers suggestion points a dependency outward or wires a

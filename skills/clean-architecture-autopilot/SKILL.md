@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.3.0 -->
+<!-- clean-architecture system v1.4.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -59,12 +59,28 @@ appends a MAJOR `process_violation` event plus a `debts` entry before the
 because the first production run entered P4 with `g3` still null and it surfaced
 only when the user thought to ask.
 
-**Gate verdicts go stale.** Re-entering P2 voids `g3`; re-entering P4 voids `g5`
-(the work the verdict certified is about to change). `cc_log.py` does this
-automatically and logs a `gate_invalidated` event — the next gated phase then
-demands a fresh verdict. From run 2: P4 was re-entered after G5 passed, the
-promised delta review never happened, and P6 closed on a verdict that predated
-~2300 new lines.
+**Gate verdicts go stale — but scoped re-entry avoids full invalidation.**
+Re-entering P2 voids `g3`; re-entering P4 **with `--scope`** does NOT void the
+full `g5` verdict — it marks the specific components as needing delta review while
+preserving the prior verdict for unaffected components. Only a **full** P4
+re-entry (no scope, meaning all components are re-implemented) voids `g5` entirely.
+`cc_log.py` handles both cases: scoped re-entry logs a `gate_scope_narrowed` event
+(listing affected components); unscoped re-entry logs `gate_invalidated` as before.
+**P6 entry gate latch (mechanically enforced by `cc_log.py`):**
+P6 `phase_enter` requires BOTH conditions:
+1. `gate_verdicts.g5` ∈ {`PASS`, `PASS_WITH_CONCERNS`}
+2. `g5_delta_scopes` is empty (absent or `[]`)
+
+If condition 1 passes but condition 2 fails (scopes still pending), `cc_log.py`
+refuses the transition with exit 2 — exactly as it does for a missing verdict.
+`--force` can bypass (with a logged `process_violation`). This mechanically prevents
+the "run 2" pattern where a scoped re-entry preserves the old verdict and P6 sails
+through without the promised delta review ever running.
+
+From run 2's lesson: P4 was re-entered after G5 passed, the promised delta review
+never happened, and P6 closed on a verdict that predated ~2300 new lines. The
+scoped mechanism + P6 latch prevents this by tracking exactly which components need
+re-review and refusing to advance until they are cleared.
 
 ### If `cc_log.py` itself cannot run (fallback — this happens)
 
@@ -189,12 +205,14 @@ bearing ones and they ship in this repo.
 ### P4 — Implementation (inside-out, per component)
 - Role agent: `agents/clean-implementer.md`
 - Local skills: `dependency-rule`, `solid-principles`, `layer-boundaries`
-- Superpowers skill: **`test-driven-development`** (write entity/use-case tests
-  first — they need no DB/UI), **`executing-plans`** / **`subagent-driven-development`**
-  (drive the P2 plan), **`dispatching-parallel-agents`** (fan out per independent
-  component — safe because the graph is a DAG), **`using-git-worktrees`** (isolate
-  parallel component work), **`systematic-debugging`** / **`investigate`** (root-cause
-  on any failure, no fixes without a cause), **`verification-before-completion`**
+- Superpowers skill: **`test-driven-development`** (drives **batched Red-Green**
+  TDD — write tests for a cohesion group, confirm batch RED, implement, confirm
+  batch GREEN; inner-layer tests need no DB/UI, proving isolation),
+  **`executing-plans`** / **`subagent-driven-development`** (drive the P2 plan),
+  **`dispatching-parallel-agents`** (fan out per independent component — safe
+  because the graph is a DAG), **`using-git-worktrees`** (isolate parallel
+  component work), **`systematic-debugging`** / **`investigate`** (root-cause on
+  any failure, no fixes without a cause), **`verification-before-completion`**
   (evidence before claiming a layer done).
 - Parallel dispatch rule: before fanning out a wave, intersect the
   `files_touched[]` of its tasks pairwise. Tasks sharing any file go to one
@@ -202,12 +220,24 @@ bearing ones and they ship in this repo.
   wave already modified its files without folding those changes in.
 - Superpowers agent: **Autopilot Implementer** (self-verifying single-task
   implementer with 4-state status), one per DAG task.
+- **Test execution policy (batched TDD + deduplication):**
+  - Each Implementer sub-agent uses **batched Red-Green** within a layer: write
+    tests for a cohesion group (3–8 behaviors), confirm batch RED in one run,
+    implement, confirm batch GREEN in one run. REFACTOR only re-runs if structure
+    truly changed. This replaces per-unit RED→GREEN→REFACTOR 3× execution.
+  - **Layer self-verify** runs only incremental tests (new/affected in this layer).
+    Tests from inner layers already confirmed GREEN are not re-executed — inner
+    code is immutable by definition. The grep-imports structural check still
+    covers all layer files.
+  - **Merge (worktree join)** runs only boundary/integration tests and tests whose
+    sources import changed files — not a full unit-test sweep. Each test executes
+    at most once in its originating batch, then only if its covered code changes.
 - Fallback (this phase depends on the most augmentations, so each intent has an
   explicit substitute):
-  - no `test-driven-development` → still write entity/use-case tests **before**
-    their implementation, injecting test doubles for every port. The proof that
-    the inner layers are isolated is that those tests run with no DB, UI, or
-    network.
+  - no `test-driven-development` → still follow batched Red-Green: write tests for
+    the cohesion group **before** implementation (test doubles for every port);
+    confirm batch RED, implement, confirm batch GREEN. Tests must pass with no
+    DB/UI/network.
   - no `executing-plans` / `subagent-driven-development` → implement the P2 DAG
     tasks serially in topological order, one component per step.
   - no `dispatching-parallel-agents` / `using-git-worktrees` → stay serial on the
@@ -217,8 +247,8 @@ bearing ones and they ship in this repo.
     cause in one sentence and confirm it with a failing test or a log line before
     editing code.
   - no `verification-before-completion` → a component counts as done only after
-    (a) its imports are checked against the layer map and (b) its tests pass;
-    record the command output as the evidence.
+    (a) its imports are checked against the layer map and (b) its incremental tests
+    pass; record the command output as the evidence.
 - Exit artifact: `{files, tests, status, concerns, debts}` per component.
 
 ### G5 — Architecture Review (GATE)
@@ -230,9 +260,17 @@ bearing ones and they ship in this repo.
   **`review`** (pre-landing diff review for SQL/side-effect/structural issues).
 - Superpowers agent: **Autopilot Code Reviewer** (spec_stage first — dependency
   rule/contracts; quality_stage second — SOLID/tests/security).
+- **Delta review mode:** When G5 runs after a targeted fix (not a full P4 re-run),
+  it operates as a **delta review** — only the components/layers that changed since
+  the last verdict are re-examined. Previously-passing sections retain their prior
+  score. This avoids full-codebase re-review on localized fixes.
+- **Precise failure routing:** On `FAIL`, each BLOCKER finding carries an explicit
+  `scope` (component name + layer). The orchestrator routes the fix back to the
+  specific component/layer in P4, not the entire phase. Only the affected scope is
+  re-implemented; unaffected components retain their `DONE` status.
 - Verdict: `PASS` → P6; `PASS_WITH_CONCERNS` → P6 with logged `debts` (needs user
-  sign-off); `FAIL` → route BLOCKERs to P4 (code) or P2 (structural), increment
-  `gate5_iterations`.
+  sign-off); `FAIL` → route BLOCKERs to P4 (code) or P2 (structural) with precise
+  scope, increment `gate5_iterations`.
 
 ### P6 — Finish
 - Local skill: —
@@ -240,6 +278,54 @@ bearing ones and they ship in this repo.
   rigor, not blind agreement), **`finishing-a-development-branch`** (merge/PR/cleanup
   decision), optionally **`ship`** if the user wants deploy.
 - Exit: accepted, integrated work + a summary of `debts`/follow-ups.
+
+---
+
+## Injection Policy (per-layer skill scoping — reduces token overhead)
+
+P4 dispatches multiple Implementer sub-agents (one per component/layer). To
+minimize input tokens per spawn, inject **only the relevant subset** of
+methodology skills — not the full text of every skill in the system.
+
+### Per-layer injection matrix
+
+| Current layer being implemented | Inject (full text) | Inject (rules summary only) |
+|---|---|---|
+| Entities | `dependency-rule` | TDD rules summary (below) |
+| Use Cases | `dependency-rule` | TDD rules summary (below) |
+| Interface Adapters | `dependency-rule`, `layer-boundaries` | TDD rules summary (below) |
+| Frameworks & Main | `layer-boundaries` | TDD rules summary (below) |
+
+- `solid-principles` is injected in full only when the component has >3 classes
+  in the layer; otherwise its intent is covered by the TDD rules summary.
+- `component-principles` is NOT injected at P4 (it is a design-time skill for
+  P2/G3); referencing it during implementation adds ~200 tokens for zero value.
+
+### TDD Rules Summary (inline injection source)
+
+This compact summary replaces full `test-driven-development` skill injection for
+each sub-agent. It preserves all behavioral constraints in ~120 tokens:
+
+> **TDD Rules (batched Red-Green mode):**
+> 1. Every line of production code must have a pre-existing failing test.
+> 2. Write tests for a cohesion group (3–8 behaviors) in one batch, then run once
+>    to confirm all fail for expected reasons (**batch RED**). If any test
+>    unexpectedly passes, fix it before writing production code.
+> 3. Implement the batch, then run once to confirm all pass (**batch GREEN**).
+> 4. REFACTOR re-runs only if structure truly changes (control flow, interface,
+>    responsibility moves); cosmetic refactors skip. Structural refactors = new batch.
+> 5. Ports are test-doubled; tests must pass with no DB/UI/network.
+> 6. Assert behavior (outputs, state changes, exceptions), never implementation
+>    (call counts, internal method sequences).
+> 7. Layer self-verify: only run incremental tests (this layer's new/affected);
+>    selection by AST import analysis, not filename heuristics.
+> 8. Each test executes at most once per batch; no redundant re-runs across layers.
+
+### Purpose
+
+Reduces per-sub-agent input by ~800–1200 tokens (from ~1500 tokens of full skill
+texts to ~300 tokens of targeted rules + single skill). Over a typical 4-layer ×
+3-component run, this saves ~12,000–15,000 input tokens total.
 
 ---
 
@@ -311,10 +397,12 @@ auxiliary, not main-flow parallelism.
 - Each parallel component runs in its own worktree via `using-git-worktrees`.
 - Worktree/branch naming: `p4/<task-slug>/<component-name>` so it maps 1:1 to the
   `.cc-skill/<task-slug>/` run and to the component in the graph.
-- Merge order at join: topological (dependency order), one at a time, re-running
-  the component's unit tests after each merge. Reclaim (remove) each worktree only
-  after its merge is verified. Never force-merge; a conflict escalates to the USER
-  LOOP.
+- Merge order at join: topological (dependency order), one at a time. After each
+  merge, run only the component's boundary/integration tests plus any test whose
+  source imports changed files (consistent with the P4 Test execution policy's
+  deduplication rule — no full unit-test sweep of already-GREEN inner tests).
+  Reclaim (remove) each worktree only after its merge is verified. Never
+  force-merge; a conflict escalates to the USER LOOP.
 
 ### Logging & rollback (append to .cc-skill/<task-slug>/run.jsonl)
 - On dispatch: `{event:"agent_dispatch", phase:"P4", detail:{component, worktree,
@@ -384,8 +472,8 @@ Naming rules for `<task-slug>`:
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
   "event":"phase_enter|phase_exit|component_done|agent_dispatch|skill_inject|
            superpower_used|superpower_unavailable|gate_verdict|gate_invalidated|
-           loop_increment|user_loop|conflict_logged|process_violation|
-           artifact_written|error",
+           gate_scope_narrowed|loop_increment|user_loop|conflict_logged|
+           process_violation|artifact_written|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -436,6 +524,30 @@ looped repeatedly signals an ambiguous boundary upstream).
   that never help (drop them), phases that dominate wall-clock (parallelize or route
   to a cheaper model).
 
+## Delta Review Data Flow (G5 scoped re-entry → delta review → clear)
+
+End-to-end lifecycle of a scoped fix after G5 FAIL:
+
+1. **G5 FAIL** with findings scoped to `ordering:adapters` and `billing:usecases`.
+2. **Orchestrator routes fix** to the specific components — enters P4 with
+   `--scope "ordering:adapters,billing:usecases"`.
+3. **`cc_log.py`** logs `gate_scope_narrowed`, preserves `gate_verdicts.g5 = PASS`
+   (or prior verdict), sets `g5_delta_scopes = ["billing:usecases","ordering:adapters"]`.
+4. **Implementer** fixes only the scoped components (batched Red-Green on affected
+   tests only).
+5. **Orchestrator attempts P6** — `cc_log.py` **blocks**: g5 verdict passes but
+   `g5_delta_scopes` is non-empty. Must run G5 first.
+6. **G5 delta review** receives `g5_delta_scopes` as input, reviews only those
+   components/layers plus cross-boundary imports.
+7. **G5 verdict** (PASS/PASS_WITH_CONCERNS) is logged → `cc_log.py` clears
+   `g5_delta_scopes` automatically.
+8. **P6 now allowed** — both conditions satisfied (verdict passing + scopes empty).
+
+If G5 delta FAILs, `g5_delta_scopes` is preserved, the loop iterates (bounded by
+`gate5_iterations ≤ 2`), and only the still-failing scope gets another fix pass.
+
+---
+
 ## Progress Checkpoint & Resume (survives context compression)
 
 `run.jsonl` is append-only history — good for audit, but you'd have to replay it to
@@ -463,6 +575,12 @@ Path: `.cc-skill/<task-slug>/state.json`
     {"name":"ordering","status":"DONE","worktree":"p4/place-order/ordering"},
     {"name":"billing","status":"in_progress"}
   ],
+  "g5_delta_scopes": ["ordering:adapters"],    // string[] | absent. Present only after
+                                                // scoped P4 re-entry; lists component:layer
+                                                // pairs awaiting delta G5 review. Next G5
+                                                // runs in delta mode if non-empty; a passing
+                                                // G5 verdict clears it. P6 latch blocks
+                                                // while non-empty.
   "pending_user_question": null,               // set when phase_status=awaiting_user
   "open_questions": [], "debts": [],
   "next_action": "implement billing component then join",

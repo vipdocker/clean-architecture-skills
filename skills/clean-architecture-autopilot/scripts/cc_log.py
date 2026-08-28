@@ -13,7 +13,13 @@ Usage:
   python3 cc_log.py event --root <project_dir> --slug <task-slug> \
       --phase P2 --event phase_enter [--agent architecture-designer] \
       [--skills a,b] [--superpowers c,d] [--verdict APPROVED] \
-      [--status in_progress] [--detail '{"k":"v"}'] [--duration-ms 1234]
+      [--status in_progress] [--detail '{"k":"v"}'] [--duration-ms 1234] \
+      [--scope 'component:layer,...']
+
+  # 2b) scoped P4 re-entry (delta review instead of full g5 invalidation)
+  python3 cc_log.py event --root <project_dir> --slug <task-slug> \
+      --phase P4 --event phase_enter --scope "ordering:adapters,billing:usecases" \
+      --status in_progress
 
   # 3) (optional) just overwrite state.json from a full JSON blob
   python3 cc_log.py state --root <project_dir> --slug <task-slug> --json '<state json>'
@@ -258,23 +264,67 @@ def cmd_event(a):
                     f"intentional, re-run with --force — that records a MAJOR "
                     f"process_violation.")
             bypassed = True
+        # P6-specific: even if g5 verdict passes, block if g5_delta_scopes is
+        # non-empty — those scopes have not yet been delta-reviewed. Without this,
+        # a scoped P4 re-entry preserves the old verdict and P6 sails through on
+        # stale certification (the exact "run 2" failure this mechanism prevents).
+        elif gate == "g5" and a.phase == "P6":
+            pending_scopes = st.get("g5_delta_scopes") or []
+            if pending_scopes:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log phase_enter P6: gate_verdicts.g5 is "
+                        f"{current!r} (passing) but g5_delta_scopes is non-empty "
+                        f"{pending_scopes} — these components have been modified "
+                        f"since the last G5 verdict and require a delta review "
+                        f"before P6 can proceed. Run G5 (full or delta) to clear "
+                        f"the pending scopes first. If the bypass is intentional, "
+                        f"re-run with --force.")
+                bypassed = True
 
     seq = next_seq(run_dir)
 
     # --- gate staleness ---------------------------------------------------
     # Re-entering P2/P4 voids the downstream verdict so the next latch check
-    # demands a fresh one. Logged, never silent.
+    # demands a fresh one — UNLESS --scope is provided for P4, which narrows
+    # the verdict to a delta review instead of full invalidation.
     stale = PHASE_INVALIDATES.get(a.phase) if a.event == "phase_enter" else None
     if stale and (st.get("gate_verdicts") or {}).get(stale):
         was = st["gate_verdicts"][stale]
-        _append_jsonl(run_dir, _event_rec(
-            st.get("run_id"), seq, a.phase, "gate_invalidated",
-            {"gate": stale, "was": was,
-             "reason": f"re-entering {a.phase} changes what {stale.upper()} "
-                       f"certified; a fresh verdict is required before the "
-                       f"next gated phase"}))
-        st["gate_verdicts"][stale] = None
-        seq += 1
+        scope_list = [s.strip() for s in a.scope.split(",") if s.strip()] if getattr(a, "scope", None) else []
+
+        if scope_list and a.phase == "P4":
+            # Scoped re-entry: don't void the full verdict; instead track which
+            # components need delta review. The gate remains "conditionally open"
+            # — P6 requires either a fresh full verdict OR a delta review covering
+            # all narrowed scopes.
+            existing_scopes = st.get("g5_delta_scopes", [])
+            merged_scopes = sorted(set(existing_scopes + scope_list))
+            st["g5_delta_scopes"] = merged_scopes
+            _append_jsonl(run_dir, _event_rec(
+                st.get("run_id"), seq, a.phase, "gate_scope_narrowed",
+                {"gate": stale, "verdict_preserved": was,
+                 "affected_scopes": scope_list,
+                 "cumulative_delta_scopes": merged_scopes,
+                 "reason": f"scoped re-entry into {a.phase} for {scope_list}; "
+                           f"{stale.upper()} verdict preserved for unaffected "
+                           f"components, delta review required for listed scopes"}))
+            seq += 1
+        else:
+            # Unscoped re-entry: full invalidation (original behavior)
+            _append_jsonl(run_dir, _event_rec(
+                st.get("run_id"), seq, a.phase, "gate_invalidated",
+                {"gate": stale, "was": was,
+                 "reason": f"re-entering {a.phase} changes what {stale.upper()} "
+                           f"certified; a fresh verdict is required before the "
+                           f"next gated phase"}))
+            st["gate_verdicts"][stale] = None
+            # Clear delta scopes only when the voided gate is g5 (P4 full re-run).
+            # P2 re-entry voids g3 but must NOT touch g5_delta_scopes — those
+            # track pending delta work for g5, which P2 doesn't affect.
+            if stale == "g5":
+                st.pop("g5_delta_scopes", None)
+            seq += 1
 
     if bypassed:
         _append_jsonl(run_dir, _event_rec(
@@ -306,6 +356,12 @@ def cmd_event(a):
         # the key rather than raising KeyError and blocking the gate.
         st.setdefault("gate_verdicts", {"g3": None, "g5": None})
         st["gate_verdicts"]["g3" if a.phase == "G3" else "g5"] = a.verdict
+        # A *passing* G5 verdict clears the pending delta scopes — the reviewer
+        # has examined them and found no blockers. A non-passing verdict (FAIL)
+        # preserves g5_delta_scopes so the orchestrator can continue targeted fixes
+        # on those specific components without losing track of which scopes need work.
+        if a.phase == "G5" and a.verdict in GATE_PASSING["g5"]:
+            st.pop("g5_delta_scopes", None)
     if a.event == "phase_exit" and a.phase not in st.get("completed_phases", []):
         st.setdefault("completed_phases", []).append(a.phase)
     st["updated_at"] = now_iso()
@@ -365,6 +421,11 @@ def main():
     pe.add_argument("--superpowers", default=""); pe.add_argument("--verdict", default=None)
     pe.add_argument("--status", default=None); pe.add_argument("--detail", default="")
     pe.add_argument("--duration-ms", dest="duration_ms", type=int, default=None)
+    pe.add_argument("--scope", default=None,
+                    help="comma-separated component:layer list for scoped re-entry "
+                         "(e.g. 'ordering:adapters,billing:usecases'); when provided "
+                         "on a phase_enter for P4, narrows the g5 verdict instead of "
+                         "fully invalidating it — enables delta review")
     pe.add_argument("--force", action="store_true",
                     help="bypass the gate latch; logs a MAJOR process_violation")
 

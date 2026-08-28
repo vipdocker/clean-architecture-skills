@@ -2,7 +2,7 @@
 name: architecture-review-checklist
 description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use layer-boundaries), for the cheaper pre-code dependency-direction audit (use dependency-rule), or for judging whether the PROCESS itself needs tuning (use process-tuning).
 ---
-<!-- clean-architecture system v1.3.0 -->
+<!-- clean-architecture system v1.4.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 
@@ -19,6 +19,49 @@ and emit an overall PASS / PASS_WITH_CONCERNS / FAIL verdict.
 - **MINOR** — naming that hides the domain (non-screaming), over-drawn boundary
   (paying for indirection not yet needed), missing DTO where a facade would do.
 - **NIT** — style/consistency; optional.
+
+## Delta Review Mode (for G5 re-runs after targeted fixes)
+
+When invoked as a **delta review** (i.e. G5 is re-running after a localized fix
+rather than a full implementation pass), restrict the review scope:
+
+1. **Input:** a `scope` parameter listing the specific components/layers that were
+   modified since the last G5 verdict (provided by the orchestrator via
+   `cc_log.py`'s `gate_scope_narrowed` tracking).
+2. **Procedure:** Run the full checklist (Sections A–E) only on the files within
+   the specified scope. For files outside the scope, carry forward the prior
+   verdict's findings unchanged.
+3. **Cross-boundary check:** Even in delta mode, verify that the fix did not
+   introduce NEW outward dependencies from unchanged components into the changed
+   scope (a fix can break an innocent neighbor). Check imports FROM unchanged
+   components INTO changed files.
+4. **Output:** The same structured output contract, but `sections[].findings[]`
+   only contains new/changed findings for the delta scope plus any cross-boundary
+   violations discovered.
+5. **Verdict logic:** Apply the same severity rules. If the delta scope is now
+   clean and no cross-boundary violations exist, the overall verdict upgrades to
+   the best of (prior verdict, current delta verdict).
+
+This avoids re-examining the entire codebase when only one component was patched,
+while still catching regressions at the boundary.
+
+**Lifecycle contract:** A successful full or delta G5 (verdict ∈ {PASS,
+PASS_WITH_CONCERNS}) MUST clear `g5_delta_scopes` in state.json — this is done
+mechanically by `cc_log.py` when the passing `gate_verdict` event is recorded. If
+`g5_delta_scopes` remains non-empty after a G5 run, it means the review did not
+cover all pending scopes, and P6 entry will be blocked by the latch. Do not
+manually clear it outside of a recorded passing G5 verdict.
+
+**Scope coverage risk:** If the `scope` parameter passed to delta review does not
+fully cover all components/layers that were actually modified, any un-covered
+changes carry the old G5 judgment — risking regression. Therefore, delta G5 MUST
+perform a **coverage diagnosis**: compare the input `delta_scope` against the
+actual file diff since the prior G5 artifact snapshot. If uncovered modifications
+are found, log them as a `mandatory_followup` with severity MAJOR so they are not
+silently skipped. The orchestrator should either expand the scope or schedule a
+follow-up review.
+
+---
 
 ## Section A — The Dependency Rule (BLOCKER-weighted)
 - [ ] No inner layer references any outer layer (entities→usecases→adapters→frameworks).
@@ -64,11 +107,15 @@ For each section, count findings by severity. Then:
 ```
 {
   verdict: PASS | PASS_WITH_CONCERNS | FAIL,
+  review_mode: "full" | "delta",
+  delta_scope: ["component:layer", ...] | null,   // null when review_mode=full
   sections: {A:{score, findings[]}, B:{...}, C:{...}, D:{...}, E:{...}},
-  findings: [{id, severity, section, evidence, principle, recommended_fix}],
+  findings: [{id, severity, section, scope, evidence, principle, recommended_fix}],
   mandatory_followups: [ ... ]   // for PASS_WITH_CONCERNS / FAIL
 }
 ```
 
-Each finding must cite concrete evidence (file/class/import or design element) and
-the exact principle violated — never a vague "looks off".
+Each finding must cite concrete evidence (file/class/import or design element),
+the exact principle violated, and the **scope** (component:layer) it belongs to —
+never a vague "looks off". The `scope` field enables precise routing of fixes back
+to the responsible Implementer sub-agent.
