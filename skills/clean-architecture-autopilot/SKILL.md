@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.4.0 -->
+<!-- clean-architecture system v1.5.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -82,6 +82,39 @@ never happened, and P6 closed on a verdict that predated ~2300 new lines. The
 scoped mechanism + P6 latch prevents this by tracking exactly which components need
 re-review and refusing to advance until they are cleared.
 
+**Closing a phase is now as gated as opening one (run 3).** That run closed P6 at
+01:34, then a live-verification FAIL reopened P4 twice and a *second* `P6
+phase_exit` was appended with no matching entry — while `completed_phases` still
+listed P6 from the first closure. Four latches now cover the exit side:
+
+1. **`phase_exit` needs an open `phase_enter`.** Exits may not outnumber entries;
+   a second closure after corrective work means the re-entry is what was missing.
+2. **Re-entering P2/P4 retracts downstream phases** from `completed_phases` and logs
+   `phase_reopened`. Voiding the gate verdict alone left the phase ledger claiming
+   the run had finished.
+3. **P6 may not close over unsigned debts.** `PASS_WITH_CONCERNS` means "passing,
+   with debts the user accepts"; the sign-off is recorded with a `debt_signoff`
+   event, which moves `state.debts` into `state.debts_signed_off`. Run 3 closed P6
+   twice with two debts outstanding and `state.debts` empty.
+4. **`PASS_WITH_CONCERNS` must name its debts** in `--detail`
+   (`debts_awaiting_signoff[]`). A PWC that names nothing is indistinguishable from
+   PASS and skips the sign-off silently.
+
+**state.json is maintained, not a snapshot.** It used to be written at `init` and
+then only `current_phase` / `phase_status` / `gate_verdicts` / `completed_phases`
+were ever touched, so run 3 finished with `p4_components: []` after 11
+`component_done` events, `artifact_pointers: {}` after 5 artifacts, `debts: []`
+beside two unsigned debts, `loops.gate5_iterations: 0` after two real G5 rounds, and
+`next_action: "run P0/P1"` — the exact string a post-compression resume would have
+acted on. `cc_log.py` now folds every event into the matching field, which also
+makes the documented loop cap (2 per gate) enforceable: a third `loop_increment`
+is refused and points at the user escalation instead.
+
+**Unlogged gaps are annotated.** Run 3 has 6h18m of silence between two events with
+no marker, which left P6's `duration_ms` reading 398 minutes of "work". A gap over
+30 minutes now appends a `pause` event, and phase durations subtract recorded
+pauses. Long pauses are legitimate; unmeasurable ones are not.
+
 ### If `cc_log.py` itself cannot run (fallback — this happens)
 
 The script needs a working shell. When the shell is unavailable, **hand-write the
@@ -143,6 +176,22 @@ never stall a phase. When one named below cannot be invoked:
    which references to keep, promote, or drop.
 3. Never weaken a gate, skip a phase, or bend the Dependency Rule to compensate.
 
+**Log the firing case too — not just the missing one.** All three production runs
+so far emitted zero `agent_dispatch`, `skill_inject` and `superpower_used` events,
+even though run 3 alone dispatched 11 components. `process-tuning` scores
+augmentation ROI by separating "fired and visibly helped" from "fired and changed
+nothing" from "was never installed"; with only the `superpower_unavailable` side
+recorded it cannot tell the first two apart, and the whole feedback loop the run log
+exists for goes dark. When you dispatch an agent or invoke an augmentation, pass it
+on the event:
+```bash
+python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
+  --phase P4 --event agent_dispatch --agent clean-implementer \
+  --skills dependency-rule,layer-boundaries \
+  --superpowers test-driven-development,using-git-worktrees \
+  --detail '{"component":"ordering"}'
+```
+
 Only a missing **local** methodology skill blocks a phase — those are the load
 bearing ones and they ship in this repo.
 
@@ -175,11 +224,32 @@ bearing ones and they ship in this repo.
   architecture/data-flow/edge-cases before it is locked).
 - Superpowers agent: **Plan** (software-architect plan), **Autopilot Designer** /
   **Autopilot Planner** (produce DAG task plan with per-task model routing).
+- Bundled tool (EXECUTABLE): `scripts/design_coverage.py` — set difference between
+  the authoritative design source's sections and what the exit artifact carries:
+  ```bash
+  python3 .../scripts/design_coverage.py --design docs/specs/<design>.md \
+    --artifact .cc-skill/<slug>/artifacts/p2-design.json
+  ```
+  `cc_log.py` refuses `phase_exit P2` unless `--detail` names a `design_source`
+  (or `"none"` with a reason) and, when a source is named, the check passes.
+
+  Run 3 is the case: the design source's `## 8. 前端约束` required reusing
+  `StockSearchWidget`, and `p2-design.json` mentioned search/搜索/widget zero
+  times. G3 approved the lossy copy — a gate cannot audit a constraint it cannot
+  see — so the omission only surfaced at G5, as a MAJOR (68 of 108 watchlist
+  symbols unreachable from the UI, including the spec's own worked example),
+  costing a corrective P4 round of 29 minutes plus an unplanned component.
 - Exit artifact: `{layer_map, ports, boundary_dtos, boundary_choices,
-  component_map, directory_tree, design_doc}`. When the design decomposes into
+  component_map, directory_tree, design_doc, design_source, sections_covered,
+  sections_out_of_scope, identifiers_waived}`. When the design decomposes into
   DAG tasks, each task must also declare `files_touched[]` — run 2 hit a
   parallel write conflict and a stale cross-wave assignment (both MAJOR-adjacent)
   because dispatch had no touch-sets to check overlap against.
+- **Every DAG task carries its own tests** in `files_touched[]`; never plan a
+  trailing "tests" task. Run 3 planned 8 tasks with no test task, shipped 6 of 8
+  components with no tests, and let an unplanned `T9_tests` sweep find 2 bugs after
+  everything was marked DONE — the batched Red-Green discipline in P4 cannot hold
+  if the plan itself defers tests to the end.
 
 ### G3 — Dependency Rule Audit (GATE)
 - Role agent: `agents/dependency-auditor.md`
@@ -268,9 +338,22 @@ bearing ones and they ship in this repo.
   `scope` (component name + layer). The orchestrator routes the fix back to the
   specific component/layer in P4, not the entire phase. Only the affected scope is
   re-implemented; unaffected components retain their `DONE` status.
-- Verdict: `PASS` → P6; `PASS_WITH_CONCERNS` → P6 with logged `debts` (needs user
-  sign-off); `FAIL` → route BLOCKERs to P4 (code) or P2 (structural) with precise
-  scope, increment `gate5_iterations`.
+- **No passing verdict without observation.** For any component with
+  runtime-visible behavior (endpoint, UI, background job), a `PASS` /
+  `PASS_WITH_CONCERNS` asserts the behavior was *observed*, not merely that the
+  structure reads correctly. If the only evidence is stubbed or mocked, record a
+  BLOCKER naming the missing verification and return `FAIL`. **Logging the gap as a
+  debt does not discharge it** — run 3's round-2 review listed `stubbed state
+  verification` among its own accepted debts, passed anyway, and live browser
+  verification 6h18m later found a MAJOR that stubs could not surface by
+  construction (a per-symbol coverage 503 escalated into a page-level blocker and
+  aborted the whole results table). Deferring a fix is a decision; deferring the
+  observation is a guess.
+- Verdict: `PASS` → P6; `PASS_WITH_CONCERNS` → P6 only after the named debts are
+  signed off by the user (`--detail '{"debts_awaiting_signoff":[...]}'` on the
+  verdict, then a `debt_signoff` event — the P6 *exit* latch enforces it); `FAIL` →
+  route BLOCKERs to P4 (code) or P2 (structural) with precise scope, increment
+  `gate5_iterations` (capped at 2, then escalate to the user).
 
 ### P6 — Finish
 - Local skill: —
@@ -470,10 +553,11 @@ Naming rules for `<task-slug>`:
 ### run.jsonl event schema (append one line per event)
 ```
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
-  "event":"phase_enter|phase_exit|component_done|agent_dispatch|skill_inject|
-           superpower_used|superpower_unavailable|gate_verdict|gate_invalidated|
-           gate_scope_narrowed|loop_increment|user_loop|conflict_logged|
-           process_violation|artifact_written|error",
+  "event":"phase_enter|phase_exit|phase_reopened|component_done|agent_dispatch|
+           skill_inject|superpower_used|superpower_unavailable|gate_verdict|
+           gate_invalidated|gate_scope_narrowed|loop_increment|user_loop|
+           debt_signoff|pause|conflict_logged|process_violation|
+           artifact_written|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -583,10 +667,25 @@ Path: `.cc-skill/<task-slug>/state.json`
                                                 // while non-empty.
   "pending_user_question": null,               // set when phase_status=awaiting_user
   "open_questions": [], "debts": [],
+  "debts_signed_off": [],                      // moved here by a debt_signoff event;
+                                                // P6 phase_exit is refused while
+                                                // "debts" is still non-empty
   "next_action": "implement billing component then join",
   "updated_at": "ISO-8601"
 }
 ```
+
+**Every field above is maintained by `cc_log.py event`** — none is a leftover from
+`init`. `component_done` appends to `p4_components`, `artifact_written` fills
+`artifact_pointers` (keyed by the lowercased phase), `loop_increment` bumps `loops`
+(and is refused past 2), a `PASS_WITH_CONCERNS` verdict lands its named debts in
+`debts`, `debt_signoff` moves them to `debts_signed_off`, `user_loop` sets
+`pending_user_question` plus `open_questions`, and `next_action` is recomputed on
+every event. Run 3 predates this: it finished with `p4_components: []`,
+`artifact_pointers: {}`, `debts: []`, `loops.gate5_iterations: 0` and
+`next_action: "run P0/P1"` — so a resume would have restarted from P0 after 11
+components were already built. If you are hand-writing the fallback log, maintain
+these fields yourself; a resume trusts this file over the history.
 Rules:
 - Write it **before** emitting the matching `run.jsonl` event, and overwrite the
   whole file each time (write-temp-then-rename for atomicity). It is the *current*

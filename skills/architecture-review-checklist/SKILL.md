@@ -2,7 +2,7 @@
 name: architecture-review-checklist
 description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use layer-boundaries), for the cheaper pre-code dependency-direction audit (use dependency-rule), or for judging whether the PROCESS itself needs tuning (use process-tuning).
 ---
-<!-- clean-architecture system v1.4.0 -->
+<!-- clean-architecture system v1.5.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 
@@ -94,6 +94,10 @@ follow-up review.
 - [ ] Business rules are unit-testable without DB, web, or UI (Humble Object applied).
 - [ ] Boundaries allow test doubles to be injected for every port.
 - [ ] Tests do not depend on volatile details (no fragile "test-through-the-GUI").
+- [ ] **Verification depth matches the risk**: every component with runtime-visible
+      behavior (endpoint, UI, background job) has evidence from a real execution,
+      not only from stubs. Stubs prove the wiring; only a real run proves the
+      behavior.
 
 ## Scoring & Verdict
 
@@ -102,7 +106,27 @@ For each section, count findings by severity. Then:
 - No BLOCKER but ≥1 MAJOR → **PASS_WITH_CONCERNS** (list mandatory follow-ups).
 - Only MINOR/NIT → **PASS**.
 
+### Precondition: no passing verdict without observation
+
+Before applying the rules above, check what evidence you hold. For any component
+with runtime-visible behavior where the only evidence is stubbed or mocked, you may
+not issue `PASS` or `PASS_WITH_CONCERNS` for it — record a BLOCKER naming the
+missing verification and return **FAIL**.
+
+**A debt does not discharge missing evidence.** Run 3's round-2 review listed
+`stubbed state verification` among its own accepted debts and passed anyway; the
+live check six hours later found a MAJOR that stubs could not surface by
+construction (a per-symbol coverage 503 escalated into a page-level blocker and
+aborted the entire results table). Deferring a *fix* is a decision you can log;
+deferring the *observation* is a guess you cannot.
+
 ## Output Contract
+
+These keys are fixed. Run 3's `g5-review.json` omitted `sections`,
+`mandatory_followups` and every finding's `scope`, described findings with
+title/detail/why_it_matters instead of the contract fields, and added ten invented
+top-level keys — so nothing downstream could consume it, and the delta review's
+scope routing had no input at all.
 
 ```
 {
@@ -114,6 +138,10 @@ For each section, count findings by severity. Then:
   mandatory_followups: [ ... ]   // for PASS_WITH_CONCERNS / FAIL
 }
 ```
+
+Every round's findings go into the one `findings` array — run 3's rounds 2 and 3
+findings (including a MAJOR) never reached the artifact even though it was
+rewritten. Per-round verdicts are separate `gate_verdict` events, not sibling keys.
 
 Each finding must cite concrete evidence (file/class/import or design element),
 the exact principle violated, and the **scope** (component:layer) it belongs to —

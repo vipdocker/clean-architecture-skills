@@ -70,6 +70,23 @@ GATE_PASSING = {"g3": {"APPROVED"}, "g5": {"PASS", "PASS_WITH_CONCERNS"}}
 # verdict that predated ~2300 new lines.
 PHASE_INVALIDATES = {"P2": "g3", "P4": "g5"}
 
+# Re-entering a phase also un-finishes everything downstream of it. Run 3 closed
+# P6 at 01:34, then a live-verification FAIL reopened P4 twice; `completed_phases`
+# still listed P6 from the first closure, so a resume would have believed the run
+# was done. Invalidating the gate verdict alone was not enough — the phase ledger
+# has to retract too.
+PHASE_REOPENS = {"P2": ["G3", "P4", "G5", "P6"], "P4": ["G5", "P6"]}
+
+# SKILL.md caps both gate loops at 2 ("if still failing, escalate an open_question
+# to the user"). Run 3 spent 2 real G5 rounds while state.loops stayed 0, because
+# loop_increment only ever reached the append-only log and nothing read it back.
+MAX_GATE_ITERATIONS = 2
+
+# A gap this long with no events means nobody was working: run 3 has 6h18m of
+# silence between seq 37 and seq 38, which made P6's duration_ms read 398 minutes.
+# Gaps are annotated (not refused) and then subtracted from phase durations.
+PAUSE_GAP_MS = 30 * 60 * 1000
+
 
 def parse_json_arg(raw, flag):
     """Parse a JSON CLI argument, naming the legal shape on failure so the caller
@@ -88,7 +105,9 @@ def now_iso():
 def slugify(s):
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    return (s or "run")[:40]
+    # Strip AFTER truncating: cutting at 40 can land on a separator, which is how
+    # run 3 ended up with the slug "option-seller-phase-a-covered-call-cash-".
+    return s[:40].strip("-") or "run"
 
 def resolve_dir(root, slug):
     base = os.path.join(root, ".cc-skill")
@@ -193,30 +212,62 @@ def next_seq(run_dir):
             n += 1
     return n
 
-def _elapsed_ms_since_enter(run_dir, phase):
-    """Wall-clock since this phase's latest phase_enter, used to auto-fill
-    duration_ms on phase_exit. Both real runs left duration_ms empty on all
-    events, so the cost section of process-tuning had nothing to work with.
-    Returns None when no matching enter exists (degraded logs)."""
+def _parse_ts(ts):
+    try:
+        return datetime.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def _scan_log(run_dir):
+    """Read run.jsonl once and return the facts the latches need.
+
+    - enters/exits: per-phase phase_enter / phase_exit counts. A phase_exit with
+      no open enter is a logging defect: run 3 appended a second `P6 phase_exit`
+      (seq 46) with only one `phase_enter` (seq 36), so the run recorded two
+      closures for one entry.
+    - last_ts: timestamp of the newest event, used to spot an unlogged gap.
+    - enter_ts / pause_ms_since_enter: per-phase, for pause-corrected durations.
+    """
+    facts = {"enters": {}, "exits": {}, "last_ts": None,
+             "enter_ts": {}, "pause_ms_since_enter": {}}
     p = os.path.join(run_dir, "run.jsonl")
     if not os.path.exists(p):
-        return None
-    ts = None
+        return facts
     with open(p, encoding="utf-8") as f:
         for line in f:
             try:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if r.get("phase") == phase and r.get("event") == "phase_enter":
-                ts = r.get("ts")
-    if not ts:
+            ph, ev = r.get("phase"), r.get("event")
+            if r.get("ts"):
+                facts["last_ts"] = r["ts"]
+            if ev == "phase_enter":
+                facts["enters"][ph] = facts["enters"].get(ph, 0) + 1
+                facts["enter_ts"][ph] = r.get("ts")
+                # a fresh entry restarts the pause tally for this phase
+                facts["pause_ms_since_enter"][ph] = 0
+            elif ev == "phase_exit":
+                facts["exits"][ph] = facts["exits"].get(ph, 0) + 1
+            elif ev == "pause":
+                gap = (r.get("detail") or {}).get("gap_ms") or 0
+                for k in facts["pause_ms_since_enter"]:
+                    facts["pause_ms_since_enter"][k] += gap
+    return facts
+
+
+def _elapsed_ms_since_enter(facts, phase):
+    """Wall-clock since this phase's latest phase_enter, minus annotated pauses,
+    used to auto-fill duration_ms on phase_exit. Both early runs left duration_ms
+    empty, so process-tuning's cost section had nothing to work with; run 3 then
+    showed the opposite failure — a 6h18m unlogged gap inflated P6 to 398 minutes.
+    Returns None when no matching enter exists (degraded logs)."""
+    then = _parse_ts(facts["enter_ts"].get(phase))
+    if then is None:
         return None
-    try:
-        then = datetime.datetime.fromisoformat(ts)
-        return int((datetime.datetime.now().astimezone() - then).total_seconds() * 1000)
-    except ValueError:
-        return None
+    elapsed = int((datetime.datetime.now().astimezone() - then).total_seconds() * 1000)
+    return max(0, elapsed - facts["pause_ms_since_enter"].get(phase, 0))
 
 def _append_jsonl(run_dir, rec):
     """Append one event. Never rewrites prior lines."""
@@ -236,6 +287,121 @@ def _event_rec(run_id, seq, phase, event, detail, agent=None, skills=None,
             "detail": detail or {}, "duration_ms": duration_ms}
 
 
+def _resolve_path(*candidates):
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _design_coverage(run_dir, root, design_source, artifact):
+    """Run the bundled design-source coverage check for a P2 exit.
+
+    Returns the result dict, or None when it cannot run (script missing, or
+    either input unresolvable). None means "unchecked", never "passed" — the
+    caller warns rather than silently approving, the same stance the rest of the
+    pipeline takes on an unavailable helper.
+    """
+    design = _resolve_path(design_source,
+                           os.path.join(root, design_source),
+                           os.path.join(run_dir, design_source))
+    art = _resolve_path(artifact,
+                        os.path.join(run_dir, artifact) if artifact else None,
+                        os.path.join(root, artifact) if artifact else None)
+    if not design or not art:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import design_coverage
+        return design_coverage.check([design], art)
+    except (ImportError, SystemExit, OSError, ValueError):
+        return None
+
+
+_PHASE_ORDER = {"P0": "P1", "P1": "P2", "P2": "G3", "G3": "P4",
+                "P4": "G5", "G5": "P6", "P6": None}
+
+
+def _derive_next_action(phase, event, verdict, st):
+    """Recompute the resume hint. Run 3 ended with next_action still reading
+    "run P0/P1" from init, which is exactly the string a post-compression resume
+    would have acted on after 11 components were already done."""
+    if event == "phase_exit":
+        nxt = _PHASE_ORDER.get(phase)
+        return f"run {nxt}" if nxt else "run complete — write summary.md"
+    if event == "gate_verdict":
+        if verdict == "APPROVED":
+            return "run P4"
+        if verdict == "REVISE_REQUIRED":
+            return "route findings back to P2, then re-run G3"
+        if verdict == "FAIL":
+            return "route BLOCKERs back to P4 (code) or P2 (structure) with scope"
+        if verdict in GATE_PASSING["g5"]:
+            debts = st.get("debts") or []
+            return ("get user sign-off on the logged debts, then run P6"
+                    if debts else "run P6")
+    if event == "component_done":
+        return f"continue {phase} with the next component"
+    if event == "user_loop":
+        return "awaiting the user's answer"
+    if event == "phase_enter":
+        return f"finish {phase}"
+    return st.get("next_action")
+
+
+def _apply_state_effects(st, phase, event, verdict, detail, seq):
+    """Fold an event into the state fields that used to be written once at init
+    and then frozen. Run 3 shipped with p4_components=[] after 11 component_done
+    events, artifact_pointers={} after 5 artifact_written events, and debts=[]
+    while two debts awaited sign-off."""
+    if event == "component_done":
+        name = detail.get("component")
+        if name:
+            entry = {"name": name, "status": detail.get("status", "DONE")}
+            for k in ("worktree", "files", "evidence"):
+                if detail.get(k):
+                    entry[k] = detail[k]
+            comps = st.setdefault("p4_components", [])
+            for i, c in enumerate(comps):
+                if c.get("name") == name:
+                    comps[i] = entry          # re-implemented in a later round
+                    break
+            else:
+                comps.append(entry)
+
+    elif event == "artifact_written":
+        path = detail.get("path")
+        if path:
+            # lowercase key to match the documented schema ("p1", "p2", "g3")
+            st.setdefault("artifact_pointers", {})[phase.lower()] = path
+
+    elif event == "gate_verdict" and phase == "G5" and verdict == "PASS_WITH_CONCERNS":
+        # The contract is "PASS_WITH_CONCERNS → P6 with logged debts (needs user
+        # sign-off)". Give those debts a machine-readable home so the P6 exit
+        # latch can see them.
+        new = detail.get("debts_awaiting_signoff") or detail.get("debts") or []
+        if isinstance(new, str):
+            new = [new]
+        debts = st.setdefault("debts", [])
+        for d in new:
+            if d not in debts:
+                debts.append(d)
+
+    elif event == "debt_signoff":
+        signed = st.get("debts") or []
+        if signed:
+            st.setdefault("debts_signed_off", []).extend(signed)
+            st["debts"] = []
+
+    elif event == "user_loop":
+        q = detail.get("question") or detail.get("reason")
+        if q:
+            st["pending_user_question"] = q
+            oq = st.setdefault("open_questions", [])
+            if q not in oq:
+                oq.append(q)
+
+
 def cmd_event(a):
     run_dir = _find_run_dir(a.root, a.slug)
     try:
@@ -245,13 +411,17 @@ def cmd_event(a):
                          hint=FALLBACK_HINT)
     detail = parse_json_arg(a.detail, "--detail") if a.detail else {}
     st = load_state(run_dir)
+    facts = _scan_log(run_dir)
 
     # --- gate latch -------------------------------------------------------
     # Refuse to record entry into a gated phase before its gate has spoken
     # with a PASSING verdict (a recorded REVISE/FAIL does not open the gate).
     # A deliberate bypass needs --force and leaves a permanent process_violation.
     gate = PHASE_GATE_PREREQ.get(a.phase) if a.event == "phase_enter" else None
-    bypassed = False
+    # Each latch that --force can override appends its own rule here. This used to
+    # be a single boolean plus the gate name, which only worked while the gate
+    # latch was the sole bypass source — the phase_exit latches below have no gate.
+    violations = []
     if gate:
         current = (st.get("gate_verdicts") or {}).get(gate)
         if current not in GATE_PASSING[gate]:
@@ -263,7 +433,10 @@ def cmd_event(a):
                     f"and log its gate_verdict first. If the bypass is "
                     f"intentional, re-run with --force — that records a MAJOR "
                     f"process_violation.")
-            bypassed = True
+            violations.append({
+                "rule": f"{a.phase} may only be entered after {gate.upper()} "
+                        f"records a passing gate_verdict",
+                "actual": f"gate_verdicts.{gate} was {current!r} at phase_enter"})
         # P6-specific: even if g5 verdict passes, block if g5_delta_scopes is
         # non-empty — those scopes have not yet been delta-reviewed. Without this,
         # a scoped P4 re-entry preserves the old verdict and P6 sails through on
@@ -280,9 +453,153 @@ def cmd_event(a):
                         f"before P6 can proceed. Run G5 (full or delta) to clear "
                         f"the pending scopes first. If the bypass is intentional, "
                         f"re-run with --force.")
-                bypassed = True
+                violations.append({
+                    "rule": "P6 requires g5_delta_scopes to be empty",
+                    "actual": f"pending delta scopes {pending_scopes}"})
+
+    # --- unmatched phase_exit --------------------------------------------
+    # Run 3 appended a second `P6 phase_exit` (seq 46) against a single
+    # `phase_enter` (seq 36): the run closed, corrective work reopened it, and the
+    # second closure was recorded without ever re-entering. Durations and the
+    # phase ledger both go wrong when exits outnumber entries.
+    if a.event == "phase_exit":
+        opened = facts["enters"].get(a.phase, 0) - facts["exits"].get(a.phase, 0)
+        if opened <= 0:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit {a.phase}: no open phase_enter "
+                    f"for it (enters={facts['enters'].get(a.phase, 0)}, "
+                    f"exits={facts['exits'].get(a.phase, 0)}). Log a "
+                    f"phase_enter {a.phase} first — if this is a second closure "
+                    f"after corrective work, the re-entry is what was missing. "
+                    f"If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": f"phase_exit {a.phase} requires an open phase_enter",
+                "actual": f"enters={facts['enters'].get(a.phase, 0)}, "
+                          f"exits={facts['exits'].get(a.phase, 0)}"})
+
+    # --- P6 may not close over unsigned debts ----------------------------
+    # "PASS_WITH_CONCERNS → P6 with logged debts (needs user sign-off)" had no
+    # enforcement: run 3 closed P6 twice with 2 debts awaiting sign-off and
+    # state.debts empty, so nothing could tell the sign-off never happened.
+    if a.event == "phase_exit" and a.phase == "P6":
+        unsigned = st.get("debts") or []
+        if unsigned:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit P6: {len(unsigned)} debt(s) still "
+                    f"await user sign-off {unsigned} — PASS_WITH_CONCERNS accepts "
+                    f"them only with the user's agreement. Record the sign-off "
+                    f"(--event debt_signoff) or clear the debts first. If the "
+                    f"bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "P6 may not close while debts await user sign-off",
+                "actual": f"{len(unsigned)} unsigned debt(s): {unsigned}"})
+
+    # --- PASS_WITH_CONCERNS must name its concerns ------------------------
+    # The verdict means "passing, but with debts the user must accept". A PWC that
+    # names nothing is indistinguishable from PASS and silently skips the sign-off.
+    if (a.event == "gate_verdict" and a.phase == "G5"
+            and a.verdict == "PASS_WITH_CONCERNS"):
+        named = detail.get("debts_awaiting_signoff") or detail.get("debts")
+        if not named:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log gate_verdict PASS_WITH_CONCERNS: no debts "
+                    "named. Pass them via --detail "
+                    "'{\"debts_awaiting_signoff\":[\"...\"]}' so the P6 latch can "
+                    "require sign-off, or record PASS if there is nothing to "
+                    "accept. If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "PASS_WITH_CONCERNS must name the debts it accepts",
+                "actual": "no debts_awaiting_signoff in --detail"})
+
+    # --- P2 may not exit with constraints the artifact never carried -------
+    # Run 3's design source had "## 8. 前端约束" requiring `StockSearchWidget`;
+    # p2-design.json mentioned search/widget zero times. G3 approved the lossy copy
+    # because a gate cannot audit what it cannot see, and G5 caught it only against
+    # the full source — a MAJOR finding and a 29-minute corrective P4 round for a
+    # gap a set difference finds instantly.
+    if a.event == "phase_exit" and a.phase == "P2":
+        src = detail.get("design_source")
+        if not src:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log phase_exit P2: --detail must name the "
+                    "authoritative design source, e.g. "
+                    "'{\"design_source\":\"docs/specs/design.md\"}'. If "
+                    "p2-design.json IS the whole design, say so explicitly with "
+                    "'{\"design_source\":\"none\",\"reason\":\"...\"}'. Without "
+                    "this, nothing can tell whether the artifact dropped a "
+                    "constraint. If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "P2 exit must name its authoritative design source",
+                "actual": "no design_source in --detail"})
+        elif src != "none":
+            art = detail.get("artifact") or \
+                (st.get("artifact_pointers") or {}).get("p2")
+            cov = _design_coverage(run_dir, a.root, src, art)
+            if cov is None:
+                print("cc_log: WARNING design coverage not checked "
+                      "(design_coverage.py unavailable or artifact not found); "
+                      "verify by hand that every design section reached "
+                      "p2-design.json", file=sys.stderr)
+            elif cov["verdict"] == "FAIL":
+                summary = (f"{len(cov['unaccounted_sections'])} unaccounted "
+                           f"section(s), "
+                           f"{len(cov['unreferenced_identifiers'])} covered "
+                           f"section(s) with identifiers missing from the artifact")
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log phase_exit P2: design coverage FAILED — "
+                        f"{summary}. Run `design_coverage.py --design {src} "
+                        f"--artifact {art}` for the itemised list. Fold the missing "
+                        f"constraints in, or record a deliberate omission in the "
+                        f"artifact's sections_out_of_scope[] / "
+                        f"identifiers_waived[]. If the bypass is intentional, "
+                        f"re-run with --force.")
+                violations.append({
+                    "rule": "P2 artifact must cover every design source section",
+                    "actual": summary})
+            detail.setdefault("design_coverage",
+                              cov["verdict"] if cov else "unchecked")
+
+    # --- gate loop cap ----------------------------------------------------
+    # SKILL.md caps each gate at 2 iterations and then escalates to the user.
+    # Nothing read the counter back, so run 3 used both G5 rounds with
+    # state.loops.gate5_iterations stuck at 0.
+    if a.event == "loop_increment":
+        key = {"G3": "gate3_iterations", "G5": "gate5_iterations"}.get(a.phase)
+        if key:
+            nxt = (st.get("loops") or {}).get(key, 0) + 1
+            if nxt > MAX_GATE_ITERATIONS and not a.force:
+                raise CCLogError(
+                    f"refusing to log loop_increment: {key} would reach {nxt}, "
+                    f"over the cap of {MAX_GATE_ITERATIONS}. A gate that keeps "
+                    f"looping signals an upstream ambiguity, not a gate problem — "
+                    f"escalate an open_question to the user (--event user_loop) "
+                    f"instead of iterating again. If the bypass is intentional, "
+                    f"re-run with --force.")
 
     seq = next_seq(run_dir)
+
+    # --- unlogged gap annotation -----------------------------------------
+    # Run 3 has 6h18m of silence between seq 37 and seq 38 with no marker, which
+    # left P6's duration reading 398 minutes of "work". Annotate the gap rather
+    # than refusing it — long pauses are legitimate, unmeasurable ones are not.
+    gap_from = _parse_ts(facts["last_ts"])
+    if gap_from is not None:
+        gap_ms = int((datetime.datetime.now().astimezone()
+                      - gap_from).total_seconds() * 1000)
+        if gap_ms >= PAUSE_GAP_MS:
+            _append_jsonl(run_dir, _event_rec(
+                st.get("run_id"), seq, a.phase, "pause",
+                {"gap_ms": gap_ms, "since": facts["last_ts"],
+                 "reason": f"no events for {gap_ms // 60000} min; auto-annotated "
+                           f"so phase durations exclude it"}))
+            for k in facts["pause_ms_since_enter"]:
+                facts["pause_ms_since_enter"][k] += gap_ms
+            seq += 1
 
     # --- gate staleness ---------------------------------------------------
     # Re-entering P2/P4 voids the downstream verdict so the next latch check
@@ -326,17 +643,33 @@ def cmd_event(a):
                 st.pop("g5_delta_scopes", None)
             seq += 1
 
-    if bypassed:
+    # --- downstream phases retract ----------------------------------------
+    # Voiding the gate verdict was not enough: run 3 re-entered P4 twice after P6
+    # had already closed, and `completed_phases` still listed P6 from the first
+    # closure. A resume reading that ledger would conclude the run was done.
+    if a.event == "phase_enter":
+        reopen = [p for p in PHASE_REOPENS.get(a.phase, [])
+                  if p in (st.get("completed_phases") or [])]
+        if reopen:
+            st["completed_phases"] = [p for p in st["completed_phases"]
+                                      if p not in reopen]
+            _append_jsonl(run_dir, _event_rec(
+                st.get("run_id"), seq, a.phase, "phase_reopened",
+                {"retracted": reopen,
+                 "reason": f"re-entering {a.phase} un-finishes the phases "
+                           f"downstream of it; they must run again"}))
+            seq += 1
+
+    for v in violations:
         _append_jsonl(run_dir, _event_rec(
             st.get("run_id"), seq, a.phase, "process_violation",
-            {"severity": "MAJOR",
-             "rule": f"{a.phase} may only be entered after {gate.upper()} "
-                     f"records a gate_verdict",
-             "actual": f"gate_verdicts.{gate} was null at phase_enter",
+            {"severity": "MAJOR", "rule": v["rule"], "actual": v["actual"],
              "bypass": "--force"}))
+        # A forced bypass becomes a debt, so it cannot be closed out silently:
+        # the P6 exit latch will require sign-off for it like any other concern.
         st.setdefault("debts", []).append(
-            f"[process] {a.phase} entered with {gate.upper()} unresolved "
-            f"(--force bypass, logged at seq {seq})")
+            f"[process] {v['rule']} — bypassed with --force at seq {seq} "
+            f"({v['actual']})")
         seq += 1
 
     rec = _event_rec(st.get("run_id"), seq, a.phase, a.event, detail,
@@ -346,11 +679,13 @@ def cmd_event(a):
                      verdict=a.verdict,
                      duration_ms=(a.duration_ms if a.duration_ms is not None
                                   or a.event != "phase_exit"
-                                  else _elapsed_ms_since_enter(run_dir, a.phase)))
+                                  else _elapsed_ms_since_enter(facts, a.phase)))
     # state.json is written FIRST (current truth), then the append (history)
     st["current_phase"] = a.phase
     if a.status:
         st["phase_status"] = a.status
+        if a.status != "awaiting_user":
+            st["pending_user_question"] = None
     if a.verdict and a.phase in ("G3", "G5"):
         # state.json may be absent or partial after an interrupted run — rebuild
         # the key rather than raising KeyError and blocking the gate.
@@ -362,8 +697,16 @@ def cmd_event(a):
         # on those specific components without losing track of which scopes need work.
         if a.phase == "G5" and a.verdict in GATE_PASSING["g5"]:
             st.pop("g5_delta_scopes", None)
+    if a.event == "loop_increment":
+        key = {"G3": "gate3_iterations", "G5": "gate5_iterations"}.get(a.phase)
+        if key:
+            loops = st.setdefault("loops", {"gate3_iterations": 0,
+                                            "gate5_iterations": 0})
+            loops[key] = loops.get(key, 0) + 1
     if a.event == "phase_exit" and a.phase not in st.get("completed_phases", []):
         st.setdefault("completed_phases", []).append(a.phase)
+    _apply_state_effects(st, a.phase, a.event, a.verdict, detail, seq)
+    st["next_action"] = _derive_next_action(a.phase, a.event, a.verdict, st)
     st["updated_at"] = now_iso()
     atomic_write(os.path.join(run_dir, "state.json"),
                  json.dumps(st, ensure_ascii=False, indent=2))

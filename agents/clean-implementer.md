@@ -1,6 +1,6 @@
 ---
 name: clean-implementer
-version: 1.4.0
+version: 1.5.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
 skills: [dependency-rule, solid-principles, layer-boundaries]
 phase: 4
@@ -109,6 +109,16 @@ it — large batches make RED diagnosis harder when something fails unexpectedly
 ## Definition of Done
 Each layer compiles, its incremental unit tests pass without external details, and
 no import points outward.
+
+A component is **not** DONE until the tests for the behavior it adds exist and have
+gone through batch RED → batch GREEN. `ruff` + `mypy` clean is not test evidence: it
+proves the code parses and types check, not that it behaves. Run 3 reported T1 and
+T3–T8 as DONE on exactly that evidence with no test files, and the trailing
+`T9_tests` sweep then found two bugs that batch RED would have caught first —
+`market_supports_options` upper-cased without stripping, so `" 0700.hk "` passed as
+options-supporting; and `_to_quotes` coerced with `NaN or 0`, which yields `NaN`
+because `NaN` is truthy. If a task arrives with no tests in its `files_touched`,
+that is a planning defect: report `NEEDS_CONTEXT` instead of implementing untested.
 
 ## Superpowers Augmentation
 - `test-driven-development` (skill) — drives **batched Red-Green** TDD: write
