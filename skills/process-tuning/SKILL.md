@@ -2,7 +2,7 @@
 name: process-tuning
 description: Analyzes a completed Clean Architecture Autopilot run to decide whether the PROCESS itself needs tuning. Takes a finished project directory (required) plus its .cc-skill/ run logs (optional but strongly preferred) and produces a tuning report — gate effectiveness scores, rework hotspots, superpowers ROI, per-phase cost, and concrete "tune this next" recommendations. Use when the user hands over a done project (and/or its logs) and asks "does the pipeline need tuning / optimizing?". Not for judging whether the produced CODE is good (use architecture-review-checklist), nor for driving a new build (use clean-architecture-autopilot).
 ---
-<!-- clean-architecture system v1.6.0 -->
+<!-- clean-architecture system v1.7.0 -->
 
 # Process Tuning (Pipeline Retrospective & Optimizer)
 
@@ -103,9 +103,35 @@ throws away an untested idea. Only a skill that *ran* and changed nothing earns 
 drop.
 
 ### E. Cost / latency
-Per-phase wall-clock (`duration_ms`) and any premium-model routing. Phases that
-dominate time → parallelize (if their tasks are independent) or route to a cheaper
-model.
+
+**Separate wall clock from effective work before calling anything slow.** Sum the
+gaps between consecutive events: intervals over ~30 min are idle, not compute. Run 3
+looked like an 8.93-hour task and was 2.63 hours of work plus one 6.30-hour
+overnight gap (71% idle); run 2 was 21.50h wall / 6.25h work; run 1 was 6.47h /
+5.47h. An agent that got *faster* reads as "too slow" if you only look at the
+calendar.
+
+Then attribute the effective work:
+- **Per phase** — `duration_ms` on `phase_exit`, pause-corrected.
+- **Per component** — `duration_ms` on `component_done`, measured from that
+  component's `agent_dispatch` with annotated pauses subtracted, and mirrored into
+  `state.p4_components[].duration_ms`.
+- **Parallelism ratio** — sum of component durations ÷ that phase's wall clock. ≈1
+  means the wave ran serially; >1 means the overlap was real. This is how you check
+  whether a plan change meant to parallelize actually did.
+- **Model routing** — each task's `recommended_model` against its measured duration.
+  Only here can you say whether `premium` earned its place.
+
+**Distrust coarse timestamps.** Compare distinct timestamps against event count: run
+1 was 30 events / 30 timestamps (real-time), run 3 was 47 / 16 because events were
+batch-written at the end of each stretch. With a ratio far above 1 you can attribute
+time to batch *windows* only — say that instead of reporting per-component numbers
+the log cannot support. A missing `agent_dispatch` has the same effect and is now
+refused, but older logs still lack it.
+
+Phases or components that dominate → parallelize (if genuinely independent — check
+the plan graph for a presentation task stuck behind an implementation) or route to a
+cheaper model.
 
 ## Output — Tuning Report
 
@@ -118,7 +144,12 @@ model.
   rework_hotspots: [{phase, reentry_count, likely_root_cause, confidence}],
   superpowers_roi: [{name, status: fired|unavailable|not_reached, decisive,
                      recommendation: keep|drop|promote|install|promote_fallback}],
-  cost: [{phase, wall_clock, recommendation}],
+  cost: {wall_clock, effective_work, idle, idle_pct,
+         per_phase: [{phase, duration, recommendation}],
+         per_component: [{component, duration, model, recommendation}],
+         parallelism_ratio,            // Σ component durations ÷ phase wall clock
+         timestamp_granularity},       // "real_time" | "batched" — batched means
+                                       // per-component numbers are unsupported
   top_3_tuning_actions: [ "..." ],   // ranked, concrete, each tied to evidence
   confidence_note                     // states which findings are low-confidence
 }

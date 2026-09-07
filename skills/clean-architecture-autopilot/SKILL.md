@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.6.0 -->
+<!-- clean-architecture system v1.7.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -176,21 +176,35 @@ never stall a phase. When one named below cannot be invoked:
    which references to keep, promote, or drop.
 3. Never weaken a gate, skip a phase, or bend the Dependency Rule to compensate.
 
-**Log the firing case too — not just the missing one.** All three production runs
-so far emitted zero `agent_dispatch`, `skill_inject` and `superpower_used` events,
-even though run 3 alone dispatched 11 components. `process-tuning` scores
-augmentation ROI by separating "fired and visibly helped" from "fired and changed
-nothing" from "was never installed"; with only the `superpower_unavailable` side
-recorded it cannot tell the first two apart, and the whole feedback loop the run log
-exists for goes dark. When you dispatch an agent or invoke an augmentation, pass it
-on the event:
+**Log the dispatch, not just the completion — this is now mechanical.**
+`cc_log.py` refuses a `component_done` that has no matching `agent_dispatch` for the
+same component. That one event buys two things, both missing from all three
+production runs, which emitted zero of them:
+
+1. **Cost.** The dispatch is the component's start time, so `component_done` gets a
+   real `duration_ms` (annotated pauses subtracted), mirrored into
+   `state.p4_components[].duration_ms`. Without it, P4 — 79% of run 3's effective
+   work — could only be attributed to batch windows, and "which component is
+   expensive" was unanswerable.
+2. **ROI.** `--agent`, `--skills` and `--superpowers` ride on this event.
+   `process-tuning` scores augmentation by separating "fired and visibly helped"
+   from "fired and changed nothing" from "was never installed"; with only the
+   `superpower_unavailable` side recorded it cannot tell the first two apart, and the
+   feedback loop the run log exists for goes dark.
+
 ```bash
 python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
   --phase P4 --event agent_dispatch --agent clean-implementer \
   --skills dependency-rule,layer-boundaries \
   --superpowers test-driven-development,using-git-worktrees \
-  --detail '{"component":"ordering"}'
+  --detail '{"component":"ordering","worktree":"p4/place-order/ordering"}'
 ```
+
+Dispatching a wave means one such event per component, logged before the work starts.
+The sum of component durations divided by that phase's wall clock is then the
+**parallelism ratio**: ≈1 means the wave ran serially despite the plan, >1 means the
+overlap was real. That ratio is the only way to confirm a plan change meant to
+parallelize actually did.
 
 Only a missing **local** methodology skill blocks a phase — those are the load
 bearing ones and they ship in this repo.
@@ -681,9 +695,10 @@ Path: `.cc-skill/<task-slug>/state.json`
     "p2":"artifacts/p2-design.json",
     "g3":"artifacts/g3-audit.json"
   },
-  "p4_components": [                            // per-component progress for parallel work
-    {"name":"ordering","status":"DONE","worktree":"p4/place-order/ordering"},
-    {"name":"billing","status":"in_progress"}
+  "p4_components": [                            // per-component progress + cost
+    {"name":"ordering","status":"DONE","worktree":"p4/place-order/ordering",
+     "dispatched_at":"ISO-8601","duration_ms":812340},
+    {"name":"billing","status":"in_progress","dispatched_at":"ISO-8601"}
   ],
   "g5_delta_scopes": ["ordering:adapters"],    // string[] | absent. Present only after
                                                 // scoped P4 re-entry; lists component:layer

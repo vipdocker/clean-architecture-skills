@@ -228,9 +228,12 @@ def _scan_log(run_dir):
       closures for one entry.
     - last_ts: timestamp of the newest event, used to spot an unlogged gap.
     - enter_ts / pause_ms_since_enter: per-phase, for pause-corrected durations.
+    - dispatch_ts / pause_ms_since_dispatch: the same per component, so a
+      component_done can be timed from its agent_dispatch.
     """
     facts = {"enters": {}, "exits": {}, "last_ts": None,
-             "enter_ts": {}, "pause_ms_since_enter": {}}
+             "enter_ts": {}, "pause_ms_since_enter": {},
+             "dispatch_ts": {}, "pause_ms_since_dispatch": {}}
     p = os.path.join(run_dir, "run.jsonl")
     if not os.path.exists(p):
         return facts
@@ -241,6 +244,7 @@ def _scan_log(run_dir):
             except json.JSONDecodeError:
                 continue
             ph, ev = r.get("phase"), r.get("event")
+            det = r.get("detail") or {}
             if r.get("ts"):
                 facts["last_ts"] = r["ts"]
             if ev == "phase_enter":
@@ -250,10 +254,17 @@ def _scan_log(run_dir):
                 facts["pause_ms_since_enter"][ph] = 0
             elif ev == "phase_exit":
                 facts["exits"][ph] = facts["exits"].get(ph, 0) + 1
+            elif ev == "agent_dispatch":
+                comp = det.get("component") or det.get("task")
+                if comp:
+                    facts["dispatch_ts"][comp] = r.get("ts")
+                    facts["pause_ms_since_dispatch"][comp] = 0
             elif ev == "pause":
-                gap = (r.get("detail") or {}).get("gap_ms") or 0
+                gap = det.get("gap_ms") or 0
                 for k in facts["pause_ms_since_enter"]:
                     facts["pause_ms_since_enter"][k] += gap
+                for k in facts["pause_ms_since_dispatch"]:
+                    facts["pause_ms_since_dispatch"][k] += gap
     return facts
 
 
@@ -268,6 +279,20 @@ def _elapsed_ms_since_enter(facts, phase):
         return None
     elapsed = int((datetime.datetime.now().astimezone() - then).total_seconds() * 1000)
     return max(0, elapsed - facts["pause_ms_since_enter"].get(phase, 0))
+
+
+def _elapsed_ms_since_dispatch(facts, component):
+    """Same idea one level down: time this component actually took, from its
+    agent_dispatch to now. All three production runs emitted zero agent_dispatch
+    events, so P4 — 79% of run 3's effective work — could only be attributed to
+    batch windows, never to a single component. Pairing the two events makes the
+    per-component cost fall out for free.
+    Returns None when the component was never dispatched."""
+    then = _parse_ts(facts["dispatch_ts"].get(component))
+    if then is None:
+        return None
+    elapsed = int((datetime.datetime.now().astimezone() - then).total_seconds() * 1000)
+    return max(0, elapsed - facts["pause_ms_since_dispatch"].get(component, 0))
 
 def _append_jsonl(run_dir, rec):
     """Append one event. Never rewrites prior lines."""
@@ -377,25 +402,44 @@ def _derive_next_action(phase, event, verdict, st):
     return st.get("next_action")
 
 
-def _apply_state_effects(st, phase, event, verdict, detail, seq):
+def _apply_state_effects(st, phase, event, verdict, detail, seq,
+                         duration_ms=None, dispatched_at=None):
     """Fold an event into the state fields that used to be written once at init
     and then frozen. Run 3 shipped with p4_components=[] after 11 component_done
     events, artifact_pointers={} after 5 artifact_written events, and debts=[]
     while two debts awaited sign-off."""
-    if event == "component_done":
-        name = detail.get("component")
+
+    def _upsert_component(name, **fields):
+        comps = st.setdefault("p4_components", [])
+        for c in comps:
+            if c.get("name") == name:
+                c.update(fields)
+                return c
+        entry = {"name": name}
+        entry.update(fields)
+        comps.append(entry)
+        return entry
+
+    if event == "agent_dispatch":
+        name = detail.get("component") or detail.get("task")
         if name:
-            entry = {"name": name, "status": detail.get("status", "DONE")}
+            # Opening the entry here means a resume that lands mid-P4 can see what
+            # was in flight, not just what finished.
+            fields = {"status": "in_progress", "dispatched_at": dispatched_at}
+            if detail.get("worktree"):
+                fields["worktree"] = detail["worktree"]
+            _upsert_component(name, **fields)
+
+    elif event == "component_done":
+        name = detail.get("component") or detail.get("task")
+        if name:
+            fields = {"status": detail.get("status", "DONE")}
             for k in ("worktree", "files", "evidence"):
                 if detail.get(k):
-                    entry[k] = detail[k]
-            comps = st.setdefault("p4_components", [])
-            for i, c in enumerate(comps):
-                if c.get("name") == name:
-                    comps[i] = entry          # re-implemented in a later round
-                    break
-            else:
-                comps.append(entry)
+                    fields[k] = detail[k]
+            if duration_ms is not None:
+                fields["duration_ms"] = duration_ms
+            _upsert_component(name, **fields)
 
     elif event == "artifact_written":
         path = detail.get("path")
@@ -644,6 +688,46 @@ def cmd_event(a):
                     f"instead of iterating again. If the bypass is intentional, "
                     f"re-run with --force.")
 
+    # --- component_done needs its agent_dispatch ---------------------------
+    # Pairing the two events buys two things that were both missing from all three
+    # production runs, which emitted zero agent_dispatch events. First, cost: P4 was
+    # 79% of run 3's effective work and could only be attributed to batch windows,
+    # never to a single component. Second, ROI: `agent`, `skills` and `superpowers`
+    # ride on the dispatch event, so without it process-tuning cannot tell
+    # "fired and changed nothing" from "was never installed".
+    if a.event == "component_done":
+        comp = detail.get("component") or detail.get("task")
+        if not comp:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log component_done: --detail must name the "
+                    "component, e.g. '{\"component\":\"ordering\",\"status\":"
+                    "\"DONE\"}'. Without it the event cannot be paired with its "
+                    "dispatch or tracked in p4_components. If the bypass is "
+                    "intentional, re-run with --force.")
+            violations.append({
+                "rule": "component_done must name its component",
+                "actual": "no component in --detail"})
+        elif comp not in facts["dispatch_ts"]:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log component_done for {comp!r}: no "
+                    f"agent_dispatch was recorded for it, so the component has no "
+                    f"start time and its cost cannot be measured. Log the dispatch "
+                    f"when the work begins:\n"
+                    f"  cc_log.py event --root <dir> --slug <slug> --phase "
+                    f"{a.phase} --event agent_dispatch \\\n"
+                    f"    --agent clean-implementer --skills dependency-rule,"
+                    f"layer-boundaries \\\n"
+                    f"    --superpowers test-driven-development \\\n"
+                    f"    --detail '{{\"component\":\"{comp}\"}}'\n"
+                    f"That one event also carries the agent/skills/superpowers "
+                    f"that augmentation ROI is scored from. If the bypass is "
+                    f"intentional, re-run with --force.")
+            violations.append({
+                "rule": "component_done requires a matching agent_dispatch",
+                "actual": f"no agent_dispatch recorded for {comp!r}"})
+
     seq = next_seq(run_dir)
 
     # --- unlogged gap annotation -----------------------------------------
@@ -662,6 +746,8 @@ def cmd_event(a):
                            f"so phase durations exclude it"}))
             for k in facts["pause_ms_since_enter"]:
                 facts["pause_ms_since_enter"][k] += gap_ms
+            for k in facts["pause_ms_since_dispatch"]:
+                facts["pause_ms_since_dispatch"][k] += gap_ms
             seq += 1
 
     # --- gate staleness ---------------------------------------------------
@@ -735,14 +821,24 @@ def cmd_event(a):
             f"({v['actual']})")
         seq += 1
 
+    if a.duration_ms is not None:
+        auto_duration = a.duration_ms
+    elif a.event == "phase_exit":
+        auto_duration = _elapsed_ms_since_enter(facts, a.phase)
+    elif a.event == "component_done":
+        # paired with agent_dispatch — this is the per-component cost that no run
+        # has been able to report so far
+        auto_duration = _elapsed_ms_since_dispatch(
+            facts, detail.get("component") or detail.get("task"))
+    else:
+        auto_duration = None
+
     rec = _event_rec(st.get("run_id"), seq, a.phase, a.event, detail,
                      agent=a.agent,
                      skills=a.skills.split(",") if a.skills else [],
                      superpowers=a.superpowers.split(",") if a.superpowers else [],
                      verdict=a.verdict,
-                     duration_ms=(a.duration_ms if a.duration_ms is not None
-                                  or a.event != "phase_exit"
-                                  else _elapsed_ms_since_enter(facts, a.phase)))
+                     duration_ms=auto_duration)
     # state.json is written FIRST (current truth), then the append (history)
     st["current_phase"] = a.phase
     if a.status:
@@ -768,7 +864,8 @@ def cmd_event(a):
             loops[key] = loops.get(key, 0) + 1
     if a.event == "phase_exit" and a.phase not in st.get("completed_phases", []):
         st.setdefault("completed_phases", []).append(a.phase)
-    _apply_state_effects(st, a.phase, a.event, a.verdict, detail, seq)
+    _apply_state_effects(st, a.phase, a.event, a.verdict, detail, seq,
+                         duration_ms=auto_duration, dispatched_at=rec["ts"])
     st["next_action"] = _derive_next_action(a.phase, a.event, a.verdict, st)
     st["updated_at"] = now_iso()
     atomic_write(os.path.join(run_dir, "state.json"),
