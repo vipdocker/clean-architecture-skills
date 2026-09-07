@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.5.0 -->
+<!-- clean-architecture system v1.6.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -239,12 +239,38 @@ bearing ones and they ship in this repo.
   see — so the omission only surfaced at G5, as a MAJOR (68 of 108 watchlist
   symbols unreachable from the UI, including the spec's own worked example),
   costing a corrective P4 round of 29 minutes plus an unplanned component.
+- Bundled tool (EXECUTABLE): `scripts/plan_graph.py` — the Dependency Rule applied
+  to the PLAN, plus critical-path depth:
+  ```bash
+  python3 .../scripts/plan_graph.py \
+    --artifact .cc-skill/<slug>/artifacts/p2-design.json
+  ```
+  A presentation task (templates/static/UI only) that blocks on a server
+  implementation is the outer layer reaching for a concretion instead of the
+  abstraction — the same violation `dependency-rule` forbids in code, one level up.
+  `cc_log.py` refuses `phase_exit P2` on an unwaived finding.
+
+  Run 3's cost: `T8 frontend` declared `depends_on: ["T6"]` (the route
+  implementation), putting it at **depth 5** behind T2→T4→T5→T6. It only needed the
+  response contract, which P2 had already defined (`### 5.6 响应契约` in the source,
+  `ports_and_boundaries.boundary_dtos` in the artifact) and which is therefore
+  available at t=0 — depth 1. The backend chain T1→T6 finished in 25.7 minutes
+  while the frontend waited, and the frontend turned out to be the expensive half
+  of the run. Fix: `depends_on: []` + `consumes_contract: ["<dto>"]`. Genuine cases
+  (a server-rendered variable that does not exist until the route is written) go in
+  `plan_serialization_waived: [{task, depends_on, reason}]`.
+
+  Depth is structure, not time: the check proves an edge is unnecessary, but the
+  minutes it costs need per-task durations (`agent_dispatch` paired with
+  `component_done`), which run 3 did not emit.
 - Exit artifact: `{layer_map, ports, boundary_dtos, boundary_choices,
   component_map, directory_tree, design_doc, design_source, sections_covered,
-  sections_out_of_scope, identifiers_waived}`. When the design decomposes into
-  DAG tasks, each task must also declare `files_touched[]` — run 2 hit a
-  parallel write conflict and a stale cross-wave assignment (both MAJOR-adjacent)
-  because dispatch had no touch-sets to check overlap against.
+  sections_out_of_scope, identifiers_waived, plan_serialization_waived}`. When the
+  design decomposes into DAG tasks, each task must also declare `files_touched[]` —
+  run 2 hit a parallel write conflict and a stale cross-wave assignment (both
+  MAJOR-adjacent) because dispatch had no touch-sets to check overlap against — and
+  a presentation task declares `consumes_contract[]` in place of a dependency on
+  the implementation.
 - **Every DAG task carries its own tests** in `files_touched[]`; never plan a
   trailing "tests" task. Run 3 planned 8 tasks with no test task, shipped 6 of 8
   components with no tests, and let an unplanned `T9_tests` sweep find 2 bugs after

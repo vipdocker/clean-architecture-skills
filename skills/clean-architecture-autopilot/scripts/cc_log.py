@@ -318,6 +318,34 @@ def _design_coverage(run_dir, root, design_source, artifact):
         return None
 
 
+def _plan_graph(run_dir, root, artifact):
+    """Run the bundled plan-graph check for a P2 exit.
+
+    Catches the Dependency Rule violated one level up: a presentation task that
+    blocks on a server implementation when the plan already carries the boundary
+    contract. Run 3's `T8 frontend` depended on `T6 routes`, which put the
+    frontend at depth 5 behind the whole backend chain even though it only needed
+    the response contract P2 had already defined.
+
+    Returns the result dict, or None when it cannot run — None means "unchecked",
+    never "passed".
+    """
+    art = _resolve_path(artifact,
+                        os.path.join(run_dir, artifact) if artifact else None,
+                        os.path.join(root, artifact) if artifact else None)
+    if not art:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import plan_graph
+        pres = [d.strip().lower().rstrip("/")
+                for d in plan_graph.DEFAULT_PRESENTATION_DIRS.split(",")
+                if d.strip()]
+        return plan_graph.check(art, pres)
+    except (ImportError, SystemExit, OSError, ValueError):
+        return None
+
+
 _PHASE_ORDER = {"P0": "P1", "P1": "P2", "P2": "G3", "G3": "P4",
                 "P4": "G5", "G5": "P6", "P6": None}
 
@@ -521,6 +549,8 @@ def cmd_event(a):
     # the full source — a MAJOR finding and a 29-minute corrective P4 round for a
     # gap a set difference finds instantly.
     if a.event == "phase_exit" and a.phase == "P2":
+        art = detail.get("artifact") or \
+            (st.get("artifact_pointers") or {}).get("p2")
         src = detail.get("design_source")
         if not src:
             if not a.force:
@@ -536,8 +566,6 @@ def cmd_event(a):
                 "rule": "P2 exit must name its authoritative design source",
                 "actual": "no design_source in --detail"})
         elif src != "none":
-            art = detail.get("artifact") or \
-                (st.get("artifact_pointers") or {}).get("p2")
             cov = _design_coverage(run_dir, a.root, src, art)
             if cov is None:
                 print("cc_log: WARNING design coverage not checked "
@@ -563,6 +591,41 @@ def cmd_event(a):
                     "actual": summary})
             detail.setdefault("design_coverage",
                               cov["verdict"] if cov else "unchecked")
+
+        # The plan graph is checked whether or not an external design source
+        # exists — the DAG is in the artifact either way. Run 3's frontend sat at
+        # depth 5 behind the backend chain for a contract P2 had already defined.
+        plan = _plan_graph(run_dir, a.root, art)
+        if plan is None:
+            print("cc_log: WARNING plan graph not checked (plan_graph.py "
+                  "unavailable or artifact not found); verify by hand that no "
+                  "presentation task blocks on a server implementation",
+                  file=sys.stderr)
+        elif plan["verdict"] == "FAIL":
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import plan_graph as _pg
+                summary = _pg.summarize(plan)
+            except ImportError:
+                summary = f"{len(plan['avoidable_serialization'])} avoidable edge(s)"
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit P2: plan graph FAILED — "
+                    f"{summary}. A presentation task blocking on a server "
+                    f"implementation is the Dependency Rule violated in the plan: "
+                    f"point it at the boundary contract instead (clear depends_on, "
+                    f"declare consumes_contract[]). Run `plan_graph.py --artifact "
+                    f"{art}` for detail. If the task genuinely needs the "
+                    f"implementation, record it in plan_serialization_waived[] "
+                    f"with a reason. If the bypass is intentional, re-run "
+                    f"with --force.")
+            violations.append({
+                "rule": "P2 plan graph must not serialize presentation work "
+                        "behind a server implementation",
+                "actual": summary})
+        if plan is not None:
+            detail.setdefault("plan_graph", plan["verdict"])
+            detail.setdefault("plan_critical_depth", plan["critical_depth"])
 
     # --- gate loop cap ----------------------------------------------------
     # SKILL.md caps each gate at 2 iterations and then escalates to the user.
