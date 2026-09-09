@@ -77,14 +77,40 @@ def classify(files, pres_dirs):
 
 
 def _normalize_files(t):
-    f = t.get("files_touched") or []
+    # Two key spellings occur: the contract's files_touched (run 3) and the
+    # component-keyed shape's plain files (run 4's p4-components.json).
+    f = t.get("files_touched") or t.get("files") or []
     if isinstance(f, str):
         f = [x.strip() for x in f.split(",") if x.strip()]
     return f
 
 
 def build(artifact, pres_dirs):
+    """Normalize the plan into {id: node}.
+
+    Two shapes occur in the wild, because each run has historically invented its
+    own: the contract shape {"dag_tasks": [...]} and run 4's component-keyed
+    {"C1_db_schema": {...}, ...} (p4-components.json). The checker reads both —
+    but the P2 exit latch decides WHERE the plan lives, via dag_tasks in the
+    contract artifact or an explicit plan_artifact pointer; silently guessing at
+    locations is how run 4's plan escaped every check.
+    """
     tasks = artifact.get("dag_tasks") or artifact.get("tasks") or []
+    if not tasks:
+        # Component-keyed shape (run 4's p4-components.json): every top-level
+        # key whose value looks like a task (declares files or depends_on) is a
+        # task; sibling keys like defects_found_and_fixed / browser_verification
+        # are run observations, not tasks.
+        for key, val in artifact.items():
+            if not isinstance(val, dict):
+                continue
+            if not (val.get("files_touched") or val.get("files")
+                    or "depends_on" in val):
+                continue
+            t = dict(val)
+            t.setdefault("id", key)
+            t.setdefault("name", key)
+            tasks.append(t)
     nodes = {}
     for t in tasks:
         tid = t.get("id") or t.get("name")

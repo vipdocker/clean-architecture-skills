@@ -21,6 +21,27 @@ Usage:
       --phase P4 --event phase_enter --scope "ordering:adapters,billing:usecases" \
       --status in_progress
 
+  # 2c) one batched USER LOOP pause (<=4 questions == one AskUserQuestion call).
+  #     Information-gap triggers must show what was looked up first; questions
+  #     answered from disk go in adopted_without_asking instead of being asked.
+  python3 cc_log.py event --root <project_dir> --slug <task-slug> \
+      --phase P1 --event user_loop --status awaiting_user \
+      --detail '{"trigger":"business_rule",
+                 "questions":["is a partial refund allowed?","who may void an order?"],
+                 "resolution_attempted":["P0 codebase_notes","docs/specs/design.md 5.6"],
+                 "adopted_without_asking":{"OQ-2":"single normalization path already in code"}}'
+
+  # 2d) accepting a MAJOR as debt: bind the user's answer to this verdict's
+  #     exact debt question (`logged seq N` from the first command)
+  python3 cc_log.py event --root <project_dir> --slug <task-slug> \
+      --phase G5 --event user_loop --status awaiting_user \
+      --detail '{"trigger":"debt_signoff","debts":["F-01"],
+                 "questions":["accept F-01 as tracked debt?"]}'
+  python3 cc_log.py event --root <project_dir> --slug <task-slug> \
+      --phase G5 --event debt_signoff \
+      --detail '{"answer":"SIGNED OFF as debt","user_loop_seq":N,
+                 "debts":["F-01"],"required_followup":"separate task: ..."}'
+
   # 3) (optional) just overwrite state.json from a full JSON blob
   python3 cc_log.py state --root <project_dir> --slug <task-slug> --json '<state json>'
 
@@ -81,6 +102,35 @@ PHASE_REOPENS = {"P2": ["G3", "P4", "G5", "P6"], "P4": ["G5", "P6"]}
 # to the user"). Run 3 spent 2 real G5 rounds while state.loops stayed 0, because
 # loop_increment only ever reached the append-only log and nothing read it back.
 MAX_GATE_ITERATIONS = 2
+
+# The four USER LOOP triggers from SKILL.md, split by what the pause is actually
+# for. This distinction is the whole point: `user_loop` was the only significant
+# event in the system with no required detail fields, so nothing could tell an
+# unavoidable authority decision from a question the agent could have answered
+# itself off disk.
+USER_LOOP_TRIGGERS = {"business_rule", "tech_choice",
+                      "gate_overflow", "debt_signoff"}
+
+# Information gaps: the answer exists somewhere (P0 codebase_notes, the design
+# source, the P2 artifact) and asking is a *substitute* for looking. These must
+# prove a lookup was attempted. Run 2's P1 pause resolved 3 of 7 open questions
+# this way (`adopted_without_asking`) and asked the other 4 in one batch — the
+# best question discipline of the three runs, invented ad hoc, recorded nowhere,
+# and therefore never repeated: run 3 emitted zero user_loop events.
+#
+# The other two triggers (gate_overflow, debt_signoff) are authority decisions,
+# not information gaps — no amount of reading grants the agent permission to
+# accept a MAJOR as debt. Requiring "did you look it up first?" there would
+# punish exactly the questions that must be asked.
+INFO_GAP_TRIGGERS = {"business_rule", "tech_choice"}
+
+# AskUserQuestion accepts at most 4 questions per call, so a pause claiming more
+# than 4 could not have been one interaction. The cap is what makes the batching
+# rule mechanical rather than aspirational: N questions must cost 1 round trip,
+# not N. grill-me's "one question at a time" is correct for an interactive design
+# interview and wrong here — across three runs the human was idle 15%/71%/71% of
+# wall clock, so serializing questions multiplies the scarcest resource.
+MAX_BATCH_QUESTIONS = 4
 
 # A gap this long with no events means nobody was working: run 3 has 6h18m of
 # silence between seq 37 and seq 38, which made P6's duration_ms read 398 minutes.
@@ -178,6 +228,7 @@ def cmd_init(a):
         "loops": {"gate3_iterations": 0, "gate5_iterations": 0},
         "artifact_pointers": {}, "p4_components": [],
         "pending_user_question": None, "open_questions": [], "debts": [],
+        "question_ledger": {"asked": 0, "self_resolved": 0},
         "next_action": "run P0/P1", "updated_at": now_iso(),
     }
     atomic_write(os.path.join(run_dir, "state.json"),
@@ -230,10 +281,18 @@ def _scan_log(run_dir):
     - enter_ts / pause_ms_since_enter: per-phase, for pause-corrected durations.
     - dispatch_ts / pause_ms_since_dispatch: the same per component, so a
       component_done can be timed from its agent_dispatch.
+    - user_loop_triggers: which USER LOOP triggers have already been recorded.
+    - latest_debt_user_loop_seq / latest_g5_pwc_seq: the exact authority chain for
+      a debt sign-off. Existence alone was too weak: an old debt question could be
+      reused against a new G5 verdict. A sign-off must reference the latest ask,
+      and that ask must follow the current PASS_WITH_CONCERNS verdict.
     """
     facts = {"enters": {}, "exits": {}, "last_ts": None,
              "enter_ts": {}, "pause_ms_since_enter": {},
-             "dispatch_ts": {}, "pause_ms_since_dispatch": {}}
+             "dispatch_ts": {}, "pause_ms_since_dispatch": {},
+             "user_loop_triggers": set(),
+             "latest_debt_user_loop_seq": None,
+             "latest_g5_pwc_seq": None}
     p = os.path.join(run_dir, "run.jsonl")
     if not os.path.exists(p):
         return facts
@@ -259,6 +318,15 @@ def _scan_log(run_dir):
                 if comp:
                     facts["dispatch_ts"][comp] = r.get("ts")
                     facts["pause_ms_since_dispatch"][comp] = 0
+            elif ev == "user_loop":
+                trig = det.get("trigger")
+                if trig:
+                    facts["user_loop_triggers"].add(trig)
+                if trig == "debt_signoff":
+                    facts["latest_debt_user_loop_seq"] = r.get("seq")
+            elif (ev == "gate_verdict" and ph == "G5"
+                  and r.get("verdict") == "PASS_WITH_CONCERNS"):
+                facts["latest_g5_pwc_seq"] = r.get("seq")
             elif ev == "pause":
                 gap = det.get("gap_ms") or 0
                 for k in facts["pause_ms_since_enter"]:
@@ -343,7 +411,7 @@ def _design_coverage(run_dir, root, design_source, artifact):
         return None
 
 
-def _plan_graph(run_dir, root, artifact):
+def _plan_graph(run_dir, root, artifact, plan_artifact=None):
     """Run the bundled plan-graph check for a P2 exit.
 
     Catches the Dependency Rule violated one level up: a presentation task that
@@ -352,12 +420,27 @@ def _plan_graph(run_dir, root, artifact):
     frontend at depth 5 behind the whole backend chain even though it only needed
     the response contract P2 had already defined.
 
+    `artifact` is the P2 exit artifact (where dag_tasks belongs by contract);
+    `plan_artifact` is the explicit pointer for runs that keep the plan in a
+    separate file. Run 4 invented `p4-components.json` and left `dag_tasks` empty
+    in p2-design.json, so the checker read a planless artifact and reported
+    NO_TASKS — the gate looked satisfied while holding nothing. Where the plan
+    lives must be a declared pointer, not a per-run discovery.
+
     Returns the result dict, or None when it cannot run — None means "unchecked",
     never "passed".
     """
-    art = _resolve_path(artifact,
-                        os.path.join(run_dir, artifact) if artifact else None,
-                        os.path.join(root, artifact) if artifact else None)
+    # The explicit pointer wins: it is the recorded statement of "the plan is
+    # here", checked against all the usual locations.
+    art = None
+    for cand in (plan_artifact, artifact):
+        if not cand:
+            continue
+        art = _resolve_path(cand,
+                            os.path.join(run_dir, cand),
+                            os.path.join(root, cand))
+        if art:
+            break
     if not art:
         return None
     try:
@@ -373,6 +456,27 @@ def _plan_graph(run_dir, root, artifact):
 
 _PHASE_ORDER = {"P0": "P1", "P1": "P2", "P2": "G3", "G3": "P4",
                 "P4": "G5", "G5": "P6", "P6": None}
+
+
+def _questions_of(detail):
+    """Normalise a user_loop batch into a list of question strings.
+
+    Three shapes appear in real logs: a single `question` string (run 1), a
+    `questions` list (the documented batch), and run 2's `questions: 4` integer
+    count beside a separate `decisions` map. The integer is tolerated for
+    backward compatibility but carries no text, so it cannot satisfy the
+    "name the questions" check — it is reported as an unnamed batch instead.
+    """
+    qs = detail.get("questions")
+    if isinstance(qs, list):
+        return [str(q) for q in qs if q]
+    single = detail.get("question") or detail.get("reason")
+    if single:
+        return [str(single)]
+    if isinstance(qs, int) and qs > 0:
+        # count without content: legal shape, zero traceability
+        return []
+    return []
 
 
 def _derive_next_action(phase, event, verdict, st):
@@ -462,16 +566,53 @@ def _apply_state_effects(st, phase, event, verdict, detail, seq,
     elif event == "debt_signoff":
         signed = st.get("debts") or []
         if signed:
-            st.setdefault("debts_signed_off", []).extend(signed)
+            # Carry the user's words with the debt. Moving the strings alone
+            # recorded that a sign-off happened but not that anyone agreed.
+            answer = detail.get("answer") or detail.get("user_response")
+            pending = st.get("pending_user_question")
+            if pending:
+                st["open_questions"] = [
+                    q for q in (st.get("open_questions") or []) if q != pending]
+            st["pending_user_question"] = None
+            st["phase_status"] = "in_progress"
+            st.setdefault("debts_signed_off", []).extend(
+                [f"{d} — signed off: {answer}" if answer else d for d in signed])
             st["debts"] = []
 
     elif event == "user_loop":
-        q = detail.get("question") or detail.get("reason")
-        if q:
-            st["pending_user_question"] = q
+        qs = _questions_of(detail)
+        if qs:
+            st["pending_user_question"] = qs[0] if len(qs) == 1 else "; ".join(qs)
             oq = st.setdefault("open_questions", [])
-            if q not in oq:
-                oq.append(q)
+            for q in qs:
+                if q not in oq:
+                    oq.append(q)
+
+    # --- question ledger (every event, not just user_loop) -------------------
+    # The ratio of "asked the user" to "resolved off disk" is what tells tuning
+    # whether the self-resolution discipline is holding. It cannot live only on
+    # user_loop: the best possible run resolves every open question from the P0
+    # notes and the design artifact and therefore emits no user_loop at all, so
+    # binding the counter to the pause event would score a perfect run as 0/0.
+    # Any event may carry adopted_without_asking (P1/P2 phase_exit is the natural
+    # place when nothing needed asking).
+    adopted = detail.get("adopted_without_asking")
+    asked = len(_questions_of(detail)) if event == "user_loop" else 0
+    if adopted or asked:
+        ledger = st.setdefault("question_ledger",
+                               {"asked": 0, "self_resolved": 0})
+        ledger["asked"] = ledger.get("asked", 0) + asked
+        if isinstance(adopted, dict):
+            n = len(adopted)
+        elif isinstance(adopted, list):
+            n = len(adopted)
+        elif isinstance(adopted, int):
+            n = adopted
+        elif adopted:
+            n = 1
+        else:
+            n = 0
+        ledger["self_resolved"] = ledger.get("self_resolved", 0) + n
 
 
 def cmd_event(a):
@@ -528,6 +669,28 @@ def cmd_event(a):
                 violations.append({
                     "rule": "P6 requires g5_delta_scopes to be empty",
                     "actual": f"pending delta scopes {pending_scopes}"})
+
+            # PASS_WITH_CONCERNS is a passing G5 verdict only conditionally: the
+            # user must accept the named debts before finish work begins. The
+            # v1.5.0 latch originally checked only phase_exit P6, which let the
+            # pipeline enter P6, perform integration/cleanup work, and discover at
+            # the last line that it never had authority to ship the debt. Keep the
+            # exit check as defense in depth, but put the real stop at the entrance.
+            unsigned = st.get("debts") or []
+            if unsigned:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log phase_enter P6: {len(unsigned)} debt(s) "
+                        f"still await user sign-off {unsigned}. G5 "
+                        f"PASS_WITH_CONCERNS opens P6 only after a real "
+                        f"debt_signoff (preceded by a user_loop and carrying the "
+                        f"user's answer). Green CI or a deadline cannot grant that "
+                        f"authority. Ask and record the sign-off first. If the "
+                        f"bypass is intentional, re-run with --force.")
+                violations.append({
+                    "rule": "P6 may only be entered after all G5 debts are "
+                            "signed off by the user",
+                    "actual": f"{len(unsigned)} unsigned debt(s): {unsigned}"})
 
     # --- unmatched phase_exit --------------------------------------------
     # Run 3 appended a second `P6 phase_exit` (seq 46) against a single
@@ -639,12 +802,82 @@ def cmd_event(a):
         # The plan graph is checked whether or not an external design source
         # exists — the DAG is in the artifact either way. Run 3's frontend sat at
         # depth 5 behind the backend chain for a contract P2 had already defined.
-        plan = _plan_graph(run_dir, a.root, art)
-        if plan is None:
+        plan_ptr = detail.get("plan_artifact")
+        if not plan_ptr and art:
+            # The artifact may itself declare where the plan lives (a
+            # recorded pointer, not a per-run discovery).
+            try:
+                art_path = _resolve_path(art, os.path.join(run_dir, art),
+                                         os.path.join(a.root, art))
+                with open(art_path, encoding="utf-8") as f:
+                    plan_ptr = (json.load(f) or {}).get("plan_artifact")
+            except (OSError, json.JSONDecodeError):
+                plan_ptr = None
+
+        plan = _plan_graph(run_dir, a.root, art, plan_ptr)
+
+        # _plan_graph returns None for two different reasons; they need opposite
+        # handling. Distinguish them by whether a plan file was even found.
+        probe = plan_ptr or art or ""
+        plan_file_found = _resolve_path(
+            probe, os.path.join(run_dir, probe) if probe else "",
+            os.path.join(a.root, probe) if probe else "")
+        if plan is None and plan_file_found:
+            # The plan file exists but the checker could not run on it — the
+            # degraded mode every bundled helper uses: warn, never silently pass.
             print("cc_log: WARNING plan graph not checked (plan_graph.py "
-                  "unavailable or artifact not found); verify by hand that no "
-                  "presentation task blocks on a server implementation",
-                  file=sys.stderr)
+                  "unavailable or the plan file could not be parsed); verify by "
+                  "hand that no presentation task blocks on a server "
+                  "implementation", file=sys.stderr)
+            detail.setdefault("plan_graph", "unchecked")
+        elif plan is None:
+            # No plan file at all. Run 4 moved the whole plan into a fresh
+            # `p4-components.json` and left dag_tasks empty: NO_TASKS then read
+            # as "nothing to check" while the gate held nothing. A missing plan
+            # is only legitimate for work with no components at all, which must
+            # say so explicitly.
+            declared_planless = detail.get("planless") or (plan_ptr == "none")
+            if declared_planless:
+                detail.setdefault("plan_graph", "NO_TASKS_DECLARED")
+            elif not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit P2: no plan found to check — "
+                    f"no artifact carries dag_tasks and no plan_artifact pointer "
+                    f"was given. Either keep dag_tasks in the P2 exit artifact, "
+                    f"or pass --detail "
+                    f"'{{\"plan_artifact\":\"artifacts/p4-components.json\"}}' "
+                    f"naming where the plan lives. Run 4 invented a separate "
+                    f"plan file silently and the checker approved a planless "
+                    f"artifact. If this task genuinely has no components, say so "
+                    f"with '\"planless\":true'. If the bypass is intentional, "
+                    f"re-run with --force.")
+            else:
+                violations.append({
+                    "rule": "P2 exit must either carry dag_tasks or declare "
+                            "where the plan lives",
+                    "actual": "no dag_tasks, no plan_artifact pointer"})
+        elif plan["verdict"] == "NO_TASKS":
+            # The plan file exists but declares zero tasks. Same failure shape as
+            # run 4: p2-design.json carried dag_tasks:0 while the real plan lived
+            # in an undeclared p4-components.json — NO_TASKS read as "satisfied".
+            declared_planless = detail.get("planless") or (plan_ptr == "none")
+            if declared_planless:
+                detail.setdefault("plan_graph", "NO_TASKS_DECLARED")
+            elif not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit P2: the plan file "
+                    f"({plan_ptr or art}) declares no dag_tasks. Run 4 shipped "
+                    f"exactly this shape — the real plan lived in an undeclared "
+                    f"p4-components.json and every plan check silently passed on "
+                    f"an empty artifact. Put the tasks in the plan file, point "
+                    f"plan_artifact at the file that actually holds them, or "
+                    f"declare '\"planless\":true' if this task has no components. "
+                    f"If the bypass is intentional, re-run with --force.")
+            else:
+                violations.append({
+                    "rule": "the plan file must carry dag_tasks or the run must "
+                            "declare planlessness",
+                    "actual": f"zero dag_tasks in {plan_ptr or art}"})
         elif plan["verdict"] == "FAIL":
             try:
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -727,6 +960,170 @@ def cmd_event(a):
             violations.append({
                 "rule": "component_done requires a matching agent_dispatch",
                 "actual": f"no agent_dispatch recorded for {comp!r}"})
+
+    # --- user_loop must be a real question, batched, and looked up first ----
+    # This was the only significant event in the system with no required detail
+    # fields, while every neighbour got a latch (P2 exit names its design_source,
+    # component_done pairs with agent_dispatch, PASS_WITH_CONCERNS names its
+    # debts, P6 needs empty delta scopes). The gap shows in the runs: run 1 asked
+    # a question the user cancelled with "继续" — the agent then decided from its
+    # own pre-marked recommendations, so the pause bought no information and cost
+    # a 15-minute gap. Run 2 batched 4 questions and self-resolved 3 more from the
+    # artifacts. Run 3 asked nothing at all across 48 events.
+    if a.event == "user_loop":
+        trigger = detail.get("trigger")
+        if trigger not in USER_LOOP_TRIGGERS:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log user_loop: --detail must name a trigger "
+                    f"from {sorted(USER_LOOP_TRIGGERS)}, got {trigger!r}. The "
+                    f"trigger decides which discipline applies — "
+                    f"{sorted(INFO_GAP_TRIGGERS)} are information gaps and must "
+                    f"show the lookup you tried first, while gate_overflow and "
+                    f"debt_signoff are authority decisions that only the user can "
+                    f"make. If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": f"user_loop must name a trigger from "
+                        f"{sorted(USER_LOOP_TRIGGERS)}",
+                "actual": f"trigger was {trigger!r}"})
+        questions = _questions_of(detail)
+        if not questions:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log user_loop: --detail must name the questions "
+                    "in text, e.g. '{\"questions\":[\"which DB backs the "
+                    "repository port?\",\"is a partial refund allowed?\"]}'. A "
+                    "bare count (run 2's 'questions': 4) records that a pause "
+                    "happened but not what was asked, so a resume cannot "
+                    "re-surface it and tuning cannot judge whether it was "
+                    "necessary. If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "user_loop must name its questions in text",
+                "actual": f"no question text in --detail (got keys "
+                          f"{sorted(detail)})"})
+        elif len(questions) > MAX_BATCH_QUESTIONS:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log user_loop: {len(questions)} questions in one "
+                    f"pause, over the batch cap of {MAX_BATCH_QUESTIONS} "
+                    f"(AskUserQuestion accepts at most that many per call), so "
+                    f"this could not have been one interaction. Split it into "
+                    f"rounds — and if the extra questions are only dependent "
+                    f"follow-ups (B's options depend on A's answer), that second "
+                    f"round belongs in its own user_loop. If the bypass is "
+                    f"intentional, re-run with --force.")
+            violations.append({
+                "rule": f"a user_loop may carry at most {MAX_BATCH_QUESTIONS} "
+                        f"questions (one AskUserQuestion call)",
+                "actual": f"{len(questions)} questions in one pause"})
+        if trigger in INFO_GAP_TRIGGERS:
+            tried = detail.get("resolution_attempted")
+            if isinstance(tried, str):
+                tried = [tried] if tried.strip() else []
+            if not tried:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log user_loop (trigger={trigger!r}): "
+                        f"--detail must carry resolution_attempted[] naming what "
+                        f"you checked before asking, e.g. "
+                        f"'{{\"resolution_attempted\":[\"P0 codebase_notes\","
+                        f"\"docs/specs/design.md §5.6\",\"p2-design.json "
+                        f"boundary_dtos\"]}}'. This trigger is an information gap: "
+                        f"the answer may already be on disk, and asking is a "
+                        f"substitute for looking. Questions you resolved that way "
+                        f"go in adopted_without_asking{{}} instead of being asked. "
+                        f"If the bypass is intentional, re-run with --force.")
+                violations.append({
+                    "rule": f"user_loop with trigger {trigger!r} must record "
+                            f"resolution_attempted[] before asking the user",
+                    "actual": "no resolution_attempted in --detail"})
+
+        if trigger == "debt_signoff":
+            current_debts = st.get("debts") or []
+            asked_debts = detail.get("debts")
+            if isinstance(asked_debts, str):
+                asked_debts = [asked_debts]
+            if not current_debts or asked_debts != current_debts:
+                if not a.force:
+                    raise CCLogError(
+                        "refusing to log debt-signoff user_loop: --detail.debts "
+                        f"must exactly match the debts awaiting sign-off. Current "
+                        f"state.debts={current_debts!r}, asked debts="
+                        f"{asked_debts!r}. Pass "
+                        f"'{{\"trigger\":\"debt_signoff\",\"debts\":"
+                        f"{json.dumps(current_debts, ensure_ascii=False)},"
+                        f"\"questions\":[\"accept these named debts?\"]}}'. "
+                        f"This binds the question to the current G5 verdict instead "
+                        f"of letting an old or generic ask authorize a new debt. If "
+                        f"the bypass is intentional, re-run with --force.")
+                violations.append({
+                    "rule": "a debt-signoff user_loop must name exactly the "
+                            "current state.debts",
+                    "actual": f"state.debts={current_debts!r}, "
+                              f"detail.debts={asked_debts!r}"})
+
+    # --- debt_signoff must bind to this verdict's exact question + debts -----
+    # The v1.5.0 P6 latch refused to close over unsigned debts, but debt_signoff
+    # cleared state.debts unconditionally. Requiring only "some debt question once"
+    # was still too weak: a stale ask could authorize a later verdict, or the answer
+    # could refer to different debts. The chain below is exact and auditable:
+    # current G5 PWC seq < referenced debt user_loop seq < this signoff, with the
+    # same debt list at both events. This is structural provenance, not cryptographic
+    # authentication of the human — the logger cannot know who typed a JSON string.
+    if a.event == "debt_signoff":
+        answer = detail.get("answer") or detail.get("user_response")
+        if not answer:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log debt_signoff: --detail must carry the user's "
+                    "actual response, e.g. '{\"answer\":\"SIGNED OFF as debt\","
+                    "\"user_loop_seq\":12,\"debts\":[\"F-01\"],"
+                    "\"required_followup\":\"...\"}'. Without it this event "
+                    "clears every debt in state.debts on the agent's own word. If "
+                    "the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "debt_signoff must record the user's actual response",
+                "actual": f"no answer in --detail (got keys {sorted(detail)})"})
+
+        current_debts = st.get("debts") or []
+        signed_debts = detail.get("debts")
+        if isinstance(signed_debts, str):
+            signed_debts = [signed_debts]
+        if not current_debts or signed_debts != current_debts:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log debt_signoff: --detail.debts must exactly "
+                    f"match current state.debts. Current={current_debts!r}, "
+                    f"signed={signed_debts!r}. This prevents an answer to one "
+                    f"finding from clearing a different set. If the bypass is "
+                    f"intentional, re-run with --force.")
+            violations.append({
+                "rule": "debt_signoff must name exactly the current state.debts",
+                "actual": f"state.debts={current_debts!r}, "
+                          f"detail.debts={signed_debts!r}"})
+
+        ref = detail.get("user_loop_seq")
+        latest_ask = facts["latest_debt_user_loop_seq"]
+        pwc_seq = facts["latest_g5_pwc_seq"]
+        chain_ok = (isinstance(ref, int) and ref == latest_ask
+                    and isinstance(pwc_seq, int) and isinstance(latest_ask, int)
+                    and latest_ask > pwc_seq)
+        if not chain_ok:
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log debt_signoff: --detail.user_loop_seq must "
+                    "reference the latest debt-signoff user_loop, and that ask "
+                    "must come after the current G5 PASS_WITH_CONCERNS verdict. "
+                    f"Got ref={ref!r}, latest debt ask seq={latest_ask!r}, "
+                    f"latest G5 PWC seq={pwc_seq!r}. Log the current debts in a "
+                    "new user_loop, wait for the user's response, then quote that "
+                    "event's seq here. If the bypass is intentional, re-run with "
+                    "--force.")
+            violations.append({
+                "rule": "debt_signoff must reference the latest debt user_loop "
+                        "after the current G5 PASS_WITH_CONCERNS verdict",
+                "actual": f"ref={ref!r}, latest_ask={latest_ask!r}, "
+                          f"latest_pwc={pwc_seq!r}"})
 
     seq = next_seq(run_dir)
 

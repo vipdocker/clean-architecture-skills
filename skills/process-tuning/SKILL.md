@@ -2,7 +2,7 @@
 name: process-tuning
 description: Analyzes a completed Clean Architecture Autopilot run to decide whether the PROCESS itself needs tuning. Takes a finished project directory (required) plus its .cc-skill/ run logs (optional but strongly preferred) and produces a tuning report — gate effectiveness scores, rework hotspots, superpowers ROI, per-phase cost, and concrete "tune this next" recommendations. Use when the user hands over a done project (and/or its logs) and asks "does the pipeline need tuning / optimizing?". Not for judging whether the produced CODE is good (use architecture-review-checklist), nor for driving a new build (use clean-architecture-autopilot).
 ---
-<!-- clean-architecture system v1.7.0 -->
+<!-- clean-architecture system v1.8.0 -->
 
 # Process Tuning (Pipeline Retrospective & Optimizer)
 
@@ -133,6 +133,45 @@ Phases or components that dominate → parallelize (if genuinely independent —
 the plan graph for a presentation task stuck behind an implementation) or route to a
 cheaper model.
 
+### F. Question discipline (asked vs self-resolved)
+
+Read `state.question_ledger` (`asked` / `self_resolved`) together with the
+`user_loop` events. Each pause carries a `trigger`, and for the two information-gap
+triggers (`business_rule`, `tech_choice`) a `resolution_attempted[]` naming what was
+checked before asking. What the two ends mean:
+
+- **Many asks, thin `resolution_attempted`** → the agent is using the user as a
+  lookup table. The fix is upstream: P0 research or the P2 artifact is missing
+  something the pipeline already had access to.
+- **Zero asks on a run that shipped surprises** → the opposite failure. Run 3 asked
+  nothing across 48 events and a live-verification MAJOR landed 6h18m after P6
+  first closed. Silence is not discipline if the guesses were wrong.
+- **A high `self_resolved` with the basis recorded** is the target state, and run 2's
+  P1 pause (4 asked, 3 adopted from the artifacts) is the reference example.
+
+**Do not score on the ledger alone.** The counts say how often the user was
+consulted, not whether the answers were right. Cross-check the adopted decisions
+against what G5 later found: an `adopted_without_asking` entry that a gate
+subsequently overturned is a self-resolution that should have been a question, and
+it is worth more than any ratio.
+
+Also verify each `debt_signoff` has the full chain: current G5 PWC → later
+`user_loop(trigger: "debt_signoff")` naming those exact debts → sign-off with the
+same `debts[]`, matching `user_loop_seq`, and a quoted `answer`. Sign-offs are now
+latched, but older logs predate it — run 3 closed P6 twice with two debts
+outstanding, so a sign-off with no matching ask is a MAJOR process finding, not a
+bookkeeping slip. This proves structural provenance, not speaker identity; an
+answer contradicted by the conversation is still a process violation.
+
+**Bound the claim honestly.** Question-blocked idle is small: across the three runs
+it is roughly 35 minutes total (run 1's single pause sat in a 15-minute gap; run 2's
+two pauses had ~0-minute gaps; run 3 had none). The 15.25h and 6.30h idle stretches
+were the user being away, not the pipeline waiting on an answer. So treat this
+section as a **correctness and authority** check, not a latency lever — the wall
+clock it recovers is minutes. Its real payoff is making unattended operation safe:
+a run that resolves its own information gaps and cannot self-sign its debts is one
+you can leave alone.
+
 ## Output — Tuning Report
 
 ```
@@ -150,6 +189,11 @@ cheaper model.
          parallelism_ratio,            // Σ component durations ÷ phase wall clock
          timestamp_granularity},       // "real_time" | "batched" — batched means
                                        // per-component numbers are unsupported
+  question_discipline: {asked, self_resolved,
+         asks_without_lookup: [{seq, trigger}],   // info-gap pause, no resolution_attempted
+         adopted_then_overturned: [{question, gate_finding}],
+         invalid_signoff_chains: [{seq, debt, reason}], // MAJOR: missing/stale/mismatched ask
+         verdict: healthy|user_as_lookup_table|silent_guessing},
   top_3_tuning_actions: [ "..." ],   // ranked, concrete, each tied to evidence
   confidence_note                     // states which findings are low-confidence
 }

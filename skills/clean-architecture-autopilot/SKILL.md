@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.7.0 -->
+<!-- clean-architecture system v1.8.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -67,15 +67,17 @@ re-entry (no scope, meaning all components are re-implemented) voids `g5` entire
 `cc_log.py` handles both cases: scoped re-entry logs a `gate_scope_narrowed` event
 (listing affected components); unscoped re-entry logs `gate_invalidated` as before.
 **P6 entry gate latch (mechanically enforced by `cc_log.py`):**
-P6 `phase_enter` requires BOTH conditions:
+P6 `phase_enter` requires ALL three conditions:
 1. `gate_verdicts.g5` ∈ {`PASS`, `PASS_WITH_CONCERNS`}
 2. `g5_delta_scopes` is empty (absent or `[]`)
+3. `state.debts` is empty (`PASS_WITH_CONCERNS` debts were signed off by the user)
 
-If condition 1 passes but condition 2 fails (scopes still pending), `cc_log.py`
-refuses the transition with exit 2 — exactly as it does for a missing verdict.
-`--force` can bypass (with a logged `process_violation`). This mechanically prevents
-the "run 2" pattern where a scoped re-entry preserves the old verdict and P6 sails
-through without the promised delta review ever running.
+If condition 1 passes but condition 2 or 3 fails, `cc_log.py` refuses the transition
+with exit 2 — exactly as it does for a missing verdict. `--force` can bypass (with
+a logged `process_violation`). Condition 2 mechanically prevents the "run 2"
+pattern where a scoped re-entry preserves the old verdict and P6 sails through
+without the promised delta review ever running; condition 3 stops P6 before finish
+work begins instead of discovering at `phase_exit` that nobody authorized the debt.
 
 From run 2's lesson: P4 was re-entered after G5 passed, the promised delta review
 never happened, and P6 closed on a verdict that predated ~2300 new lines. The
@@ -115,6 +117,24 @@ no marker, which left P6's `duration_ms` reading 398 minutes of "work". A gap ov
 30 minutes now appends a `pause` event, and phase durations subtract recorded
 pauses. Long pauses are legitimate; unmeasurable ones are not.
 
+**The user loop was the last unlatched event — and the debt sign-off was
+self-issuable.** Every neighbour had a mechanical precondition while `user_loop`
+required nothing at all, which is why the three runs each handled questions
+differently and the best of them never recurred: run 1 asked a question the user
+cancelled with "继续"; run 2 batched 4 questions and resolved 3 more off disk,
+recording that in an ad-hoc `adopted_without_asking` field this repo never defined;
+run 3 asked nothing across 48 events. Worse, `debt_signoff` cleared
+`state.debts` unconditionally — no preceding question, no record of what the user
+said — so the v1.5.0 "P6 may not close over unsigned debts" latch actually verified
+that *a sign-off event existed*, not that anyone agreed. An agent could sign its
+own MAJOR findings and walk through P6. Both are now latched: see the USER LOOP
+section for the trigger taxonomy, the 4-question batch cap, the
+`resolution_attempted[]` requirement on information gaps, and the exact sign-off
+chain: an ask after the current PWC names the current debts; the sign-off repeats
+that debt list, quotes the answer, and references the ask's `seq`. The logger proves
+that order and identity of subject, not cryptographic authorship — the orchestrator
+must never fabricate the quoted answer.
+
 ### If `cc_log.py` itself cannot run (fallback — this happens)
 
 The script needs a working shell. When the shell is unavailable, **hand-write the
@@ -126,7 +146,11 @@ same files with your normal file tools** rather than skipping the log:
 3. `state.json` — rewrite the whole file each time.
 4. **You now own the latch the script would have enforced**: before writing
    `phase_enter P4`, read `gate_verdicts.g3`; if it is null, write the
-   `process_violation` event yourself instead of quietly proceeding.
+   `process_violation` event yourself instead of quietly proceeding. The same
+   applies to `debt_signoff` — confirm the preceding `user_loop` follows the
+   current PWC and names the exact `state.debts`; repeat that list, reference the
+   ask's `user_loop_seq`, and record the user's `answer`, or you are signing their
+   name for them.
 
 ---
 
@@ -143,7 +167,8 @@ INIT → P0_RESEARCH? → P1_REQUIREMENTS → P2_DESIGN → G3_DEP_AUDIT ─┐
 ```
 
 State variables the orchestrator tracks:
-`{phase, artifacts{}, gate3_iterations, gate5_iterations, open_questions[], debts[]}`.
+`{phase, artifacts{}, gate3_iterations, gate5_iterations, open_questions[], debts[],
+question_ledger{asked, self_resolved}}`.
 
 Transition rules:
 - Enter a phase only when its required input artifact keys exist and validate.
@@ -277,6 +302,15 @@ bearing ones and they ship in this repo.
   Depth is structure, not time: the check proves an edge is unnecessary, but the
   minutes it costs need per-task durations (`agent_dispatch` paired with
   `component_done`), which run 3 did not emit.
+- **Where the plan lives is a contract, not a per-run discovery.** `cc_log.py`
+  refuses `phase_exit P2` when no plan can be checked: the exit artifact carries
+  no `dag_tasks` AND no pointer was given. Run 4 invented `p4-components.json`
+  (component-keyed, no `dag_tasks` key) and left `p2-design.json` empty, so every
+  plan check read a planless artifact as "satisfied". Keep the tasks in the exit
+  artifact, or declare `"plan_artifact": "artifacts/p4-components.json"` in the
+  exit `--detail` (the checker reads both the contract shape and the
+  component-keyed shape). A task with genuinely no components declares
+  `"planless": true`.
 - Exit artifact: `{layer_map, ports, boundary_dtos, boundary_choices,
   component_map, directory_tree, design_doc, design_source, sections_covered,
   sections_out_of_scope, identifiers_waived, plan_serialization_waived}`. When the
@@ -391,7 +425,8 @@ bearing ones and they ship in this repo.
   observation is a guess.
 - Verdict: `PASS` → P6; `PASS_WITH_CONCERNS` → P6 only after the named debts are
   signed off by the user (`--detail '{"debts_awaiting_signoff":[...]}'` on the
-  verdict, then a `debt_signoff` event — the P6 *exit* latch enforces it); `FAIL` →
+  verdict, then a `debt_signoff` event — the P6 *entry* latch enforces it, with the
+  exit latch retained as defense in depth); `FAIL` →
   route BLOCKERs to P4 (code) or P2 (structural) with precise scope, increment
   `gate5_iterations` (capped at 2, then escalate to the user).
 
@@ -469,15 +504,74 @@ producing agent with a `NEEDS_CONTEXT` note.
 
 ## USER LOOP — when the orchestrator must pause and ask
 
-1. P1 produced `open_questions` about a business rule / actor.
-2. A concrete technology must be chosen (DB/framework/UI) that design kept behind a
-   port — surface options, don't decide silently.
-3. `gate3_iterations` or `gate5_iterations` exceeded 2 → the axis of change or a
-   boundary is genuinely ambiguous; escalate.
-4. G5 wants to accept a MAJOR finding as `debt` → require explicit sign-off.
+Four triggers, split by what the pause is actually for. The distinction decides
+the discipline, and `cc_log.py` enforces it from `detail.trigger`:
 
-Use one structured multiple-choice question per decision; keep options mutually
-exclusive.
+**Information gaps** — the answer may already exist on disk, so asking is a
+*substitute for looking*. These require `resolution_attempted[]`:
+1. `business_rule` — P1 produced `open_questions` about a business rule / actor.
+2. `tech_choice` — a concrete technology must be chosen (DB/framework/UI) that the
+   design kept behind a port. Surface options; don't decide silently.
+
+**Authority decisions** — no amount of reading grants permission, so no lookup is
+required (and demanding one would punish the questions that must be asked):
+3. `gate_overflow` — `gate3_iterations` or `gate5_iterations` exceeded 2; the axis
+   of change or a boundary is genuinely ambiguous.
+4. `debt_signoff` — G5 wants to accept a MAJOR finding as `debt`.
+
+### Resolve before asking
+
+For an information gap, check the sources you already have — P0 `codebase_notes`,
+the authoritative design source, the P2 artifact (`boundary_dtos`, `layer_map`) —
+and name them in `resolution_attempted[]`. Questions you answer that way are
+**adopted, not asked**: record them in `adopted_without_asking{}` with the
+one-line basis for each. Run 2's P1 pause did exactly this — 4 questions asked, 3
+resolved from the artifacts — and it is the best question discipline of the three
+production runs. It was invented on the spot, written down nowhere, and never
+recurred: run 3 emitted zero `user_loop` events across 48.
+
+### Batch, don't serialize
+
+**One `user_loop` per phase boundary, carrying up to 4 questions — not one pause
+per decision.** `AskUserQuestion` accepts at most 4 questions per call, so 4
+questions must cost one round trip, and `cc_log.py` refuses a pause claiming more.
+
+This is deliberately the opposite of an interactive design interview, where asking
+one question at a time and waiting is correct because the human is present and
+engaged. Here the human is the scarce resource — idle 15% / 71% / 71% of wall
+clock across the three runs — so every extra round trip is charged against the
+part of the pipeline that is already the bottleneck.
+
+**Exception (the one thing serialization is for):** if question B's options depend
+on the answer to A, they cannot share a pause. Split into two rounds and say so —
+the second round is its own `user_loop`.
+
+### Make the options decidable
+
+2–4 concrete, mutually exclusive options per question, **recommended option first
+and marked as such**. Generic yes/no is useless unless the question is genuinely
+binary. Run 1 is the cautionary case: the agent asked, the user cancelled with
+"继续", and the agent then proceeded on recommendations it had already marked — so
+the pause bought no information and cost a 15-minute gap. If you can already name
+the recommendation, ask whether this is an information gap you should have closed
+yourself.
+
+### What is mechanical
+
+- `user_loop` must name a legal `trigger`, name its questions **in text** (a bare
+  count records that a pause happened but not what was asked), and stay within the
+  4-question cap. Information-gap triggers must carry `resolution_attempted[]`.
+- A debt ask must follow the current PWC and name the exact `state.debts`.
+  `debt_signoff` repeats that list, carries the user's actual `answer`, and sets
+  `user_loop_seq` to that exact ask. A stale/generic ask or different debt list is
+  refused. Before this, the v1.5.0 P6 latch verified only that a sign-off event had
+  been written — not that anyone was asked — so the record was self-issuable. The
+  logger proves sequence and subject, not cryptographic authorship; fabricating the
+  answer remains a process violation.
+- `state.question_ledger` counts `asked` vs `self_resolved` across the run. It is
+  fed by any event carrying `adopted_without_asking`, not only by `user_loop`,
+  because the ideal run resolves everything off disk and emits no pause at all —
+  binding the counter to the pause event would score that run 0/0.
 
 ---
 
@@ -554,7 +648,7 @@ boundary) — log a `conflict_logged` and send the design back to P2.
   artifacts_index:{p1,p2,p4},
   injections:{ methodology_skills[], superpowers_used[], agents_dispatched[] },
   loops:{gate3_iterations, gate5_iterations},
-  debts[], open_questions[], next_action
+  debts[], open_questions[], question_ledger:{asked, self_resolved}, next_action
 }
 ```
 
@@ -609,6 +703,16 @@ Rules:
   Dependency Rule; `superpower_unavailable` (with `detail.name` and
   `detail.fallback`) whenever a named augmentation cannot be invoked and its
   fallback is applied instead.
+- **`user_loop` detail is required, not decorative**: `trigger` (one of
+  `business_rule` | `tech_choice` | `gate_overflow` | `debt_signoff`), `questions[]`
+  in text (≤ 4 per pause), and — for the two information-gap triggers —
+  `resolution_attempted[]`. `adopted_without_asking{}` is optional on any event and
+  feeds `state.question_ledger.self_resolved`.
+- **`debt_signoff` needs an exact provenance chain**: after the current PWC, a
+  `user_loop` with `trigger: "debt_signoff"` names the exact `debts[]`; the sign-off
+  repeats those debts, quotes the user's `answer`, and references that event's
+  `user_loop_seq`. The logger validates order/subject; it cannot authenticate who
+  typed JSON, so inventing an answer is still forbidden.
 - **`component_done`, not `phase_exit`, for each P4 component.** P4 implements many
   components under one `phase_enter`; reusing `phase_exit` per component makes the
   log look like repeated re-entry and destroys rework analysis.
@@ -636,6 +740,9 @@ rounds each gate needed); the list of superpowers actually used vs skipped vs
 **unavailable** (the last group is an environment gap, not a judgement call — keep
 it separate so tuning does not mistake "never fired" for "no value"); all
 `debts` accepted with sign-off; all `open_questions` and how they were resolved;
+the `question_ledger` (how many questions were put to the user vs answered from the
+artifacts — a run that asked a lot has an upstream information gap, one that asked
+nothing while shipping surprises had the opposite problem);
 per-phase wall-clock; and a short "what to tune next time" note (e.g. a gate that
 looped repeatedly signals an ambiguous boundary upstream).
 
@@ -708,6 +815,13 @@ Path: `.cc-skill/<task-slug>/state.json`
                                                 // while non-empty.
   "pending_user_question": null,               // set when phase_status=awaiting_user
   "open_questions": [], "debts": [],
+  "question_ledger": {"asked": 0, "self_resolved": 0},
+                                                // asked = questions in user_loop
+                                                // events; self_resolved = entries in
+                                                // adopted_without_asking on ANY event.
+                                                // A run that answers everything off
+                                                // disk emits no user_loop, so the
+                                                // counter cannot live on that event.
   "debts_signed_off": [],                      // moved here by a debt_signoff event;
                                                 // P6 phase_exit is refused while
                                                 // "debts" is still non-empty

@@ -1,6 +1,6 @@
 # Clean Architecture Skill & Agent System
 
-**System version: 1.7.0** ｜ 所有 skill 与 agent 版本统一为 `1.7.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
+**System version: 1.8.0** ｜ 所有 skill 与 agent 版本统一为 `1.8.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
@@ -69,7 +69,12 @@ clean-code/
 - **dispatch 表**：每一步派哪个 Agent、注入哪个方法论 Skill、传什么 artifact JSON。
 - **质量门路由**：G3 出 `APPROVED`/`REVISE_REQUIRED`（回 P2，≤2 轮）；G5 出
   `PASS`/`PASS_WITH_CONCERNS`(记债)/`FAIL`（按 BLOCKER 类型回退 P4 或 P2）。
-- **用户回路**：需求歧义、技术选型、门超迭代上限、MAJOR 转技术债 这四种情况暂停问你。
+- **用户回路**：需求歧义、技术选型、门超迭代上限、MAJOR 转技术债 这四种情况暂停问你。前两类是
+  **信息缺口**——答案可能已经在 P0 调研笔记、设计源或 P2 产物里，必须先去查并记录查了什么，查到的
+  算「自行采纳」而不是提问；后两类是**授权决策**，只有你能拍。提问一律**批量**：一个 phase 边界一次
+  暂停、最多 4 个问题（一次交互问完），而不是一个决策打断一次——除非后一个问题的选项取决于前一个的
+  答复。技术债签字必须重复本轮待签债务、引用本轮提问的事件序号并记录你的答复；脚本能证明顺序和签的
+  是哪些债，不能鉴别人类身份，所以 agent 仍被明确禁止伪造答复。
 - **运行日志与审计轨迹**：所有日志统一放在项目根的 `.cc-skill/` 下，每个任务一个
   以**任务简述命名**的子目录（如 `.cc-skill/place-order/`）。其中追加式写
   `run.jsonl`（逐事件：进/出 phase、派了哪个 Agent、注入哪些 Skill、门的 verdict、
@@ -82,7 +87,10 @@ clean-code/
   `skills/clean-architecture-autopilot/scripts/cc_log.py` 落实。skill 的 **Step 0 Bootstrap**
   强制第一步就 `cc_log.py init` 建目录，之后每次 phase 进出/门判都调 `cc_log.py event`（一次调用同时
   覆写 `state.json` + 追加 `run.jsonl`）。强约束：`phase_enter` 未记录不得进入该 phase、`gate_verdict`
-  未记录不得过门；到 P1 时若 `.cc-skill/<slug>/` 不存在必须先补 `init`。这样避免"规范只是 prose、模型
+  未记录不得过门；到 P1 时若 `.cc-skill/<slug>/` 不存在必须先补 `init`；`user_loop` 必须声明 trigger、
+  用文字写清问了什么、单次不超过 4 个问题，信息缺口类还要给出查过哪些来源；`debt_signoff` 必须重复
+  本轮 PWC 的债务清单、引用本轮提问的事件序号并带你的答复（否则那道「P6 不得带未签字技术债进入」的
+  门只是在验证「有人写过一条签字记录」，而这条记录 agent 自己就能写）。这样避免"规范只是 prose、模型
   跑起来却没生成 `.cc-skill/`"的问题。
 
 用法：把 `clean-architecture-autopilot/SKILL.md` 作为系统提示喂给你的编码 Agent，附上需求，
@@ -131,8 +139,9 @@ clean-code/
 - **降级模式**：若项目当初不是用本编排器跑的、没有 `.cc-skill/`，回退到 **git 历史 + 代码结构**做
   弱推断（从 commit 返工/回滚模式猜热点），并把这类结论标 `low-confidence`。
 - **输出**：一份调优报告——各门有效性（well_calibrated / too_loose / too_strict + 修法）、返工
-  热点排名、superpowers ROI（keep/drop/promote）、各阶段耗时建议、以及排好序的 **top 3 调优动作**
-  （每条都附证据）。报告写回 `.cc-skill/` 便于跨任务累积。
+  热点排名、superpowers ROI（keep/drop/promote）、各阶段耗时建议、**提问纪律**（问了几个 vs 自行
+  从产物解决几个、有没有「信息缺口类提问但没查过任何来源」、有没有「签字前根本没问」）、以及排好序的
+  **top 3 调优动作**（每条都附证据）。报告写回 `.cc-skill/` 便于跨任务累积。
 - **一条纪律**：门反复循环通常是**上游**边界/actor 有歧义，应调上游 phase，而不是"直接把门放松"。
 
 用法：把做完的项目目录（连同 `.cc-skill/` 日志一起最好）丢给我并说"看看流程要不要调优"，我就按这个
