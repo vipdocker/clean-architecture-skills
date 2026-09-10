@@ -68,7 +68,9 @@ routes fixes and the delta review narrows scope by reading them.
   sections: { A:{score, findings[]}, B:{...}, C:{...}, D:{...}, E:{...} },
   verdict: PASS | PASS_WITH_CONCERNS | FAIL,
   findings: [{id, severity, section, scope, evidence, principle, recommended_fix}],
-  mandatory_followups: [ ... ]   // required for PASS_WITH_CONCERNS / FAIL
+  mandatory_followups: [ ... ],   // required for PASS_WITH_CONCERNS / FAIL
+  checks_passed: [ ... ],         // what the review actually verified
+  tracked_issues: [ ... ]         // recorded observations, NOT sign-off debts
 }
 ```
 
@@ -91,6 +93,21 @@ Contract rules learned from run 3, whose `g5-review.json` broke all four:
   `accepted_debts`, `acceptance_criteria_from_design_section_11`, …). Round history
   belongs in `findings[].id` plus the run log; per-round verdicts are recorded as
   separate `gate_verdict` events, not as sibling keys here.
+
+Two rules learned from run 4:
+
+- **`checks_passed` — declare the coverage.** One line per check actually performed
+  (dependency direction on the real graph, migration/init/schema consistency,
+  idempotency semantics, live evidence per runtime component). Run 4 emitted 8
+  entries unprompted and it is the cheapest review-quality improvement there is:
+  it lets an audit distinguish what was *verified* from what was merely *not
+  flagged*.
+- **Debts are not a notebook.** A PASS verdict with a non-empty debts array is a
+  contract violation: debts belong to `PASS_WITH_CONCERNS` and demand user
+  sign-off. Run 4 shipped `PASS` plus 3 NIT-level `debts` — none of which needed a
+  user decision — which misused the sign-off channel as a backlog. Observations
+  that need no acceptance decision go in `tracked_issues`; PASS with non-empty
+  `tracked_issues` is fine.
 
 Prose quality inside a finding is welcome — run 3's `detail` text explained the
 watchlist-reachability defect well. Put it in `evidence` and `recommended_fix`

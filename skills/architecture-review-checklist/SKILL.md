@@ -135,9 +135,32 @@ scope routing had no input at all.
   delta_scope: ["component:layer", ...] | null,   // null when review_mode=full
   sections: {A:{score, findings[]}, B:{...}, C:{...}, D:{...}, E:{...}},
   findings: [{id, severity, section, scope, evidence, principle, recommended_fix}],
-  mandatory_followups: [ ... ]   // for PASS_WITH_CONCERNS / FAIL
+  mandatory_followups: [ ... ],   // for PASS_WITH_CONCERNS / FAIL
+  checks_passed: [ ... ],         // what the review actually verified (see below)
+  tracked_issues: [ ... ]         // recorded but NOT sign-off debts (see below)
 }
 ```
+
+**`checks_passed` — declare the coverage, not just the verdict.** One line per
+check actually performed (dependency direction on the real graph, migration/init
+schema consistency, idempotency semantics, live evidence per runtime component…).
+Run 4 was the first run to do this (8 entries) and it is the single cheapest
+improvement to review quality: an audit can tell what was *verified* apart from
+what was merely *not flagged*.
+
+**Debts vs tracked issues — two different things, don't conflate them.**
+
+- `debts_awaiting_signoff[]` (on the verdict event) — concerns the user must
+  *accept* before P6 closes; `cc_log.py` refuses the P6 exit until they are signed.
+  Use for anything whose acceptance is a decision: known gaps, deferred work.
+- `tracked_issues[]` (here) — observations recorded for the backlog with no
+  acceptance decision attached: style idioms that match existing repo conventions,
+  minor refactors, "watch this". Run 4 emitted PASS with a 3-item `debts` array
+  whose entries were exactly this kind — NIT-level, no user decision needed —
+  which sidestepped the sign-off machinery by mislabeling. Label them
+  `tracked_issues` and the contract stops being ambiguous: PASS + non-empty
+  `tracked_issues` is fine; PASS + debts is not (record PASS_WITH_CONCERNS
+  instead, and let the sign-off do its job).
 
 Every round's findings go into the one `findings` array — run 3's rounds 2 and 3
 findings (including a MAJOR) never reached the artifact even though it was
