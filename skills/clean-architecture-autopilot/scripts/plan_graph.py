@@ -20,7 +20,7 @@ Why this exists (run 3, option-seller-phase-a):
   This is the Dependency Rule violated one level up. A presentation task depending
   on a server implementation is an outward dependency in the plan graph: the outer
   thing (UI) reaching for a concretion (the route) instead of the abstraction (the
-  boundary DTO). `dependency-rule` already forbids this in code; nothing checked
+  boundary DTO). `ca-dependency-rule` already forbids this in code; nothing checked
   the plan.
 
 What it does NOT do: quantify the saving. That needs per-task durations, which

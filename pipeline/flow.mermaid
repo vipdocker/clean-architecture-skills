@@ -12,41 +12,42 @@ flowchart TD
 
     subgraph P1["P1 需求 → 实体/用例"]
         direction TB
-        P1A["Agent: requirements-analyst<br/>(+ general-purpose)"]:::agent
-        P1L["本地Skill: use-case-extraction"]:::local
+        P1A["Agent: ca-requirements-analyst<br/>(+ general-purpose)"]:::agent
+        P1L["本地Skill: ca-use-case-extraction"]:::local
         P1S["Superpowers: brainstorming(必做) · feature-spec"]:::sp
     end
 
     subgraph P2["P2 分层设计"]
         direction TB
-        P2A["Agent: architecture-designer<br/>(+ Plan / Autopilot Designer·Planner)"]:::agent
-        P2L["本地Skill: layer-boundaries · component-principles · solid-principles"]:::local
+        P2A["Agent: ca-architecture-designer<br/>(+ Plan / Autopilot Designer·Planner)"]:::agent
+        P2L["本地Skill: ca-layer-boundaries · ca-component-principles · ca-solid-principles"]:::local
         P2S["Superpowers: writing-plans · plan-eng-review"]:::sp
     end
 
-    G3{"G3 依赖规则门<br/>dependency-auditor"}:::gate
+    G3{"G3 依赖规则门<br/>ca-dependency-auditor"}:::gate
     subgraph G3B["G3 调用"]
         direction TB
-        G3L["本地Skill: dependency-rule · component-principles"]:::local
+        G3L["本地Skill: ca-dependency-rule · ca-component-principles"]:::local
         G3S["Superpowers: ast-code-analysis-superpower<br/>(ast-grep 机扫朝外依赖/环) · Explore"]:::sp
     end
 
     subgraph P4["P4 由内向外实现（按组件并行）"]
         direction TB
         P4A["Agent: Autopilot Implementer (每任务一个)"]:::agent
-        P4L["本地Skill: dependency-rule · solid-principles · layer-boundaries"]:::local
+        P4L["本地Skill: ca-dependency-rule · ca-solid-principles · ca-layer-boundaries"]:::local
         P4S["Superpowers: test-driven-development · executing-plans ·<br/>dispatching-parallel-agents · using-git-worktrees ·<br/>systematic-debugging/investigate · verification-before-completion"]:::sp
     end
 
-    G5{"G5 架构评审门<br/>architecture-reviewer"}:::gate
+    G5{"G5 架构评审门<br/>ca-architecture-reviewer"}:::gate
     subgraph G5B["G5 调用"]
         direction TB
-        G5L["本地Skill: architecture-review-checklist (+三个深入skill)"]:::local
+        G5L["本地Skill: ca-architecture-review-checklist (+三个深入skill)"]:::local
         G5S["Superpowers: requesting-code-review · ast-code-analysis-superpower ·<br/>codex(对抗) · review · Agent: Autopilot Code Reviewer"]:::sp
     end
 
     subgraph P6["P6 收尾"]
         direction TB
+        P6R["机械处理报告 cc_log.py report → report.md<br/>（时间账本/组件耗时/并行度/门裁决/签字债务/改动文件）<br/>P6 exit 门闩强制"]:::gate
         P6S["Superpowers: receiving-code-review ·<br/>finishing-a-development-branch · ship"]:::sp
     end
 
@@ -85,7 +86,7 @@ flowchart TD
     DONE -. 生成summary .-> LOG
 
     %% 流程复盘调优（读日志+项目目录，产出调优报告，反哺下一轮各 phase/门）
-    TUNE["process-tuning 复盘调优<br/>输入: 项目目录(+.cc-skill日志)<br/>输出: 门有效性·返工热点·增强ROI·top3调优动作"]:::tune
+    TUNE["ca-process-tuning 复盘调优<br/>输入: 项目目录(+.cc-skill日志)<br/>输出: 门有效性·返工热点·增强ROI·top3调优动作"]:::tune
     LOG -. 读日志 .-> TUNE
     DONE -. 读项目目录 .-> TUNE
     TUNE -. "调优建议(下一轮)" .-> P1

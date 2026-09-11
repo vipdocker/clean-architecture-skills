@@ -8,26 +8,26 @@ right station. The design mirrors a harness pattern: **plan → gate → build �
 
 ```
           ┌──────────────────────┐
-  input ─▶│ 1. Requirements       │  skills: use-case-extraction
+  input ─▶│ 1. Requirements       │  skills: ca-use-case-extraction
           │    Analyst            │
           └───────────┬──────────┘
                       │ entities[], use_cases[], deferred_details[], open_questions[]
                       ▼
           ┌──────────────────────┐
-          │ 2. Architecture       │  skills: layer-boundaries,
-          │    Designer           │          component-principles, solid-principles
+          │ 2. Architecture       │  skills: ca-layer-boundaries,
+          │    Designer           │          ca-component-principles, ca-solid-principles
           └───────────┬──────────┘
                       │ layer_map, ports[], boundary_dtos[], component_map, tree, design_doc
                       ▼
           ┌──────────────────────┐   REVISE_REQUIRED
           │ 3. Dependency         │──────────────────┐
           │    Auditor (GATE)     │  skills:          │ (back to Designer)
-          └───────────┬──────────┘  dependency-rule, │
-                      │ APPROVED     component-principles
+          └───────────┬──────────┘  ca-dependency-rule, │
+                      │ APPROVED     ca-component-principles
                       ▼             ◀──────────────────┘
           ┌──────────────────────┐
-          │ 4. Clean Implementer  │  skills: dependency-rule,
-          │  (per layer,          │          solid-principles, layer-boundaries
+          │ 4. Clean Implementer  │  skills: ca-dependency-rule,
+          │  (per layer,          │          ca-solid-principles, ca-layer-boundaries
           │   inside-out,         │          (batched Red-Green TDD,
           │   batched TDD)        │           cross-layer deduplication)
           └───────────┬──────────┘
@@ -127,11 +127,11 @@ rigor but never overrides the Dependency Rule or the local methodology skills.
 | Phase | Role agent | Local skill(s) | Superpowers skill(s) | Superpowers agent(s) |
 |---|---|---|---|---|
 | P0 research | — | — | find-skills, context7 | Explore, Autopilot Researcher |
-| P1 requirements | requirements-analyst | use-case-extraction | brainstorming, feature-spec | general-purpose |
-| P2 design | architecture-designer | layer-boundaries, component-principles, solid-principles | writing-plans, plan-eng-review | Plan, Autopilot Designer/Planner |
-| G3 dep audit | dependency-auditor | dependency-rule, component-principles | ast-code-analysis-superpower | Explore |
-| P4 implement | clean-implementer | dependency-rule, solid-principles, layer-boundaries | test-driven-development (batched Red-Green + dedup), executing-plans, subagent-driven-development, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
-| G5 review (delta on re-run) | architecture-reviewer | architecture-review-checklist (+3) | requesting-code-review, ast-code-analysis-superpower, codex, review | Autopilot Code Reviewer |
+| P1 requirements | ca-requirements-analyst | ca-use-case-extraction | brainstorming, feature-spec | general-purpose |
+| P2 design | ca-architecture-designer | ca-layer-boundaries, ca-component-principles, ca-solid-principles | writing-plans, plan-eng-review | Plan, Autopilot Designer/Planner |
+| G3 dep audit | ca-dependency-auditor | ca-dependency-rule, ca-component-principles | ast-code-analysis-superpower | Explore |
+| P4 implement | ca-clean-implementer | ca-dependency-rule, ca-solid-principles, ca-layer-boundaries | test-driven-development (batched Red-Green + dedup), executing-plans, subagent-driven-development, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
+| G5 review (delta on re-run) | ca-architecture-reviewer | ca-architecture-review-checklist (+3) | requesting-code-review, ast-code-analysis-superpower, codex, review | Autopilot Code Reviewer |
 | P6 finish | — | — | receiving-code-review, finishing-a-development-branch, ship | — |
 
 Conflict rule: if a superpowers suggestion points a dependency outward or wires a

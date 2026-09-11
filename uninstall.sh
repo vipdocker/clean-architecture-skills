@@ -42,6 +42,18 @@ for root in "$HOME/.qoder/skills" "$HOME/.agents/skills" "$HOME/.qoderwork/skill
   done
 done
 
+# ─── Remove pre-v1.9.0 skill names (no ca- prefix), ownership-guarded ───
+LEGACY_SKILLS="use-case-extraction layer-boundaries dependency-rule solid-principles component-principles architecture-review-checklist process-tuning"
+for legacy in $LEGACY_SKILLS; do
+  for root in "$HOME/.qoder/skills" "$HOME/.agents/skills" "$HOME/.qoderwork/skills"; do
+    t="$root/$legacy"
+    if [ -d "$t" ] && [ ! -L "$t" ] && grep -q "clean-architecture system" "$t/SKILL.md" 2>/dev/null; then
+      echo -e "  Removing ${root/#$HOME/\~}/$legacy (pre-v1.9.0 name)"
+      rm -rf "$t"
+    fi
+  done
+done
+
 # ─── Remove agents: package subdirs + legacy flat copies ───
 AGENT_PKG="clean-architecture-autopilot"
 

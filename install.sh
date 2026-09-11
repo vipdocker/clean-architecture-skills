@@ -107,6 +107,42 @@ fi
 echo -e "  Version consistency: ${GREEN}${VERSION} across ${#SKILLS[@]} skills + ${#AGENTS[@]} agents${NC}"
 echo ""
 
+# ─── Migration: remove pre-v1.9.0 skill names (no ca- prefix) ───
+# The 7 methodology skills gained a ca- prefix in v1.9.0. Stale copies under
+# the old names would shadow/duplicate the new ones. Ownership is proven by
+# the "clean-architecture system" marker so third-party skills of the same
+# name are never touched.
+LEGACY_SKILLS="use-case-extraction layer-boundaries dependency-rule solid-principles component-principles architecture-review-checklist process-tuning"
+MIGRATED=0
+for legacy in $LEGACY_SKILLS; do
+  for root in "$HOME/.agents/skills" "$HOME/.qoder/skills"; do
+    t="$root/$legacy"
+    if [ -d "$t" ] && [ ! -L "$t" ] && grep -q "clean-architecture system" "$t/SKILL.md" 2>/dev/null; then
+      echo -e "  ${YELLOW}Removing legacy skill: $root/$legacy (pre-v1.9.0 name)${NC}"
+      rm -rf "$t"
+      MIGRATED=1
+    fi
+  done
+  t="$HOME/.qoderwork/skills/$legacy"
+  if [ -L "$t" ]; then
+    case "$(readlink "$t")" in
+      "$HOME/.agents/skills/"*)
+        echo -e "  ${YELLOW}Removing legacy symlink: ~/.qoderwork/skills/$legacy${NC}"
+        rm -f "$t"
+        MIGRATED=1
+        ;;
+    esac
+  elif [ -d "$t" ] && grep -q "clean-architecture system" "$t/SKILL.md" 2>/dev/null; then
+    echo -e "  ${YELLOW}Removing legacy dir: ~/.qoderwork/skills/$legacy${NC}"
+    rm -rf "$t"
+    MIGRATED=1
+  fi
+done
+if [ "$MIGRATED" -ne 0 ]; then
+  echo -e "  ${YELLOW}Migrated to ca- prefixed names (v1.9.0).${NC}"
+  echo ""
+fi
+
 # ─── Install skills → ~/.agents/skills (real copies) ───
 echo -e "${CYAN}[Skills → ~/.agents/skills/]${NC}"
 
@@ -184,6 +220,18 @@ echo ""
 
 # ─── Install agents → package subdirectories in both locations ───
 echo -e "${CYAN}[Agents → ~/.qoder/agents/$AGENT_PKG/ + ~/.qoderwork/agents/$AGENT_PKG/]${NC}"
+
+# pre-v1.9.0 agent names (no ca- prefix) linger because cp adds but never
+# removes; purge them so the package dir lists each agent exactly once
+LEGACY_AGENTS="requirements-analyst architecture-designer dependency-auditor clean-implementer architecture-reviewer"
+for root in "$HOME/.qoder/agents" "$HOME/.qoderwork/agents"; do
+  for legacy in $LEGACY_AGENTS; do
+    if [ -f "$root/$AGENT_PKG/$legacy.md" ]; then
+      echo -e "  ${YELLOW}Removing legacy agent: $root/$AGENT_PKG/$legacy.md${NC}"
+      rm -f "$root/$AGENT_PKG/$legacy.md"
+    fi
+  done
+done
 
 for root in "$HOME/.qoder/agents" "$HOME/.qoderwork/agents"; do
   mkdir -p "$root/$AGENT_PKG"
