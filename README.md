@@ -41,7 +41,10 @@ clean-code/
 └── pipeline/
     ├── orchestration.md                        DAG 流程、质量门、反馈回路、并行策略
     ├── flow.mermaid                            处理流程图源（每环节的 Agent/Skill/增强）
-    └── flow.png                                流程图高清 PNG
+    ├── flow.png                                流程图 PNG（mermaid 渲染）
+    ├── autopilot-flow.dot                      结构化流程图正典源（Graphviz，证据可溯源）
+    ├── autopilot-flow.drawio                   可编辑 Draw.io 交付版（稳定 ID 同源）
+    └── autopilot-flow.png                      高清流程图 PNG（@200DPI，README 内嵌）
 ```
 
 **三层心智模型**：`skills/` 是"知识"，`agents/` 是"用知识的人"，`pipeline/` 是"怎么把人排成流水线"。一个 Skill 可被多个 Agent 复用（例如 `ca-dependency-rule` 同时服务审计员和实现者）。
@@ -63,6 +66,12 @@ clean-code/
 ---
 
 ## 3.5 总控入口：clean-architecture-autopilot
+
+### 流程总览
+
+![Clean Architecture Autopilot 处理流程](pipeline/autopilot-flow.png)
+
+> 图源为 Graphviz DOT（`pipeline/autopilot-flow.dot`，**正典**，每个元素可溯源到 `SKILL.md` 与 `cc_log.py` 门闩常量）；另有可编辑的 Draw.io 交付版 `pipeline/autopilot-flow.drawio`（稳定 ID 与 DOT 一致）。图中：蓝=阶段、红菱形=质量门（含 ≤2 轮返工回路）、紫虚线=机械检查器（P2 退出门闩）、灰圆柱=运行日志账本、绿虚线=USER LOOP 四触发器。流程变化时**先改 DOT 再同步**。
 
 之前这套体系缺一个"装配线"——`orchestration.md` 只是图纸，串接靠人工。现在补上了
 `skills/clean-architecture-autopilot/SKILL.md` 作为**唯一编排入口**，它把上面 5 个 Agent

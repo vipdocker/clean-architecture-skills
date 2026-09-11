@@ -1,0 +1,57 @@
+// Clean Architecture Autopilot — 处理流程 (L2/L3 视图)
+// 源: skills/clean-architecture-autopilot/SKILL.md + scripts/cc_log.py 门闩常量 (v1.10.0)
+// 置信度: 全部 high (直接来自仓库源码)
+digraph pipeline {
+  rankdir=TB;
+  bgcolor="#FAFAFA";
+  fontname="PingFang SC";
+  node [fontname="PingFang SC", fontsize=11, style="filled,rounded", penwidth=1.5];
+  edge [fontname="PingFang SC", fontsize=9, color="#555555"];
+
+  // ── 编排器 ──
+  orch [label="编排器\nclean-architecture-autopilot\n(状态机 + 产物契约 + 用户循环)", shape=box, fillcolor="#1a56db", fontcolor="white", width=3.2];
+
+  // ── 阶段 (蓝) ──
+  P0 [label="P0 研究 (可选·存量库时)\nAgent: Explore / Autopilot Researcher", shape=box, fillcolor="#DBEAFE", color="#1a56db"];
+  P1 [label="P1 需求 → 实体/用例\nAgent: ca-requirements-analyst\nSkill: ca-use-case-extraction", shape=box, fillcolor="#DBEAFE", color="#1a56db"];
+  P2 [label="P2 分层设计\nAgent: ca-architecture-designer\nSkill: ca-layer-boundaries · ca-component-principles", shape=box, fillcolor="#DBEAFE", color="#1a56db"];
+  P4 [label="P4 实现 (由内向外·按波并行)\nAgent: ca-clean-implementer ×N (每组件)\n批量 Red-Green TDD · 契约驱动前端", shape=box, fillcolor="#DBEAFE", color="#1a56db"];
+  P6 [label="P6 收尾\nreport.md (机械处理报告·门闩强制)\nsummary.md · 债务签字闭环", shape=box, fillcolor="#DBEAFE", color="#1a56db"];
+
+  // ── 门 (红) ──
+  G3 [label="G3 依赖规则门\nAgent: ca-dependency-auditor\n工具: dep_graph.py (AST+Tarjan)", shape=diamond, fillcolor="#FEE2E2", color="#dc2626", width=2.6, height=1.3];
+  G5 [label="G5 架构评审门\nAgent: ca-architecture-reviewer\nSkill: ca-architecture-review-checklist\n实机证据前置: 无观察不得判过", shape=diamond, fillcolor="#FEE2E2", color="#dc2626", width=2.6, height=1.5];
+
+  // ── 机械检查器 (紫) ──
+  CHK [label="机械检查器 (cc_log.py 内嵌)\ndesign_coverage.py 设计源章节覆盖\nplan_graph.py 计划图依赖规则", shape=box, fillcolor="#F3E8FF", color="#7c3aed", width=3.0];
+
+  // ── 日志账本 ──
+  LOG [label=".cc-skill/<slug>/ 运行日志\nrun.jsonl (追加) · state.json (权威)\nmanifest.json (基线提交)", shape=cylinder, fillcolor="#E5E7EB", color="#374151", width=2.6];
+
+  // ── 用户循环 (绿) ──
+  USER [label="USER LOOP\nbusiness_rule · tech_choice\ngate_overflow · debt_signoff\n(≤4问/次·批量)", shape=box, fillcolor="#DCFCE7", color="#16a34a", width=2.4];
+
+  DONE [label="DONE\n验收交付", shape=doublecircle, fillcolor="#16a34a", fontcolor="white"];
+
+  // ── 主流程 ──
+  orch -> P0 [label="启动"];
+  P0 -> P1 [label="存量库"];
+  orch -> P1 [label="全新", style=dashed];
+  P1 -> P2;
+  P2 -> G3 [label="P2退出门闩:\ndesign_coverage PASS\n+ plan_graph PASS"];
+  G3 -> P4 [label="APPROVED\n(进入门闩)"];
+  P4 -> G5;
+  G5 -> P6 [label="PASS /\nPWC+签字"];
+  G5 -> P4 [label="FAIL\n(精准scope路由)", color="#dc2626", style=dashed, constraint=false];
+  G3 -> P2 [label="REVISE\n≤2轮", color="#dc2626", style=dashed, constraint=false];
+  P6 -> DONE [label="report.md\n门闩"];
+
+  // ── 机制边 ──
+  P2 -> CHK [label="退出门闩", style=dotted, color="#7c3aed", arrowhead=none];
+  CHK -> LOG [style=invis];
+  P4 -> LOG [label="agent_dispatch⇄component_done\n(配对计时)", fontsize=9];
+  P6 -> LOG [label="report 汇编", fontsize=9];
+  USER -> orch [label="authority 决策", style=dashed, color="#16a34a", constraint=false];
+  P1 -> USER [label="①②触发", style=dashed, color="#16a34a", constraint=false];
+  G5 -> USER [label="③④触发", style=dashed, color="#16a34a", constraint=false];
+}

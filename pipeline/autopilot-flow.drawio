@@ -1,0 +1,210 @@
+<mxfile host="app.diagrams.net" agent="clean-code autopilot-flow" version="24.7.8">
+  <diagram id="autopilot-flow-v1" name="Clean Architecture Autopilot 处理流程">
+    <mxGraphModel dx="1420" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ══ 标题区 ══ -->
+        <mxCell id="title" value="Clean Architecture Autopilot — 处理流程（v1.10.0）" style="text;html=1;fontSize=20;fontStyle=1;fontColor=#1e293b;align=center;" vertex="1" parent="1">
+          <mxGeometry x="440" y="20" width="520" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="plan → gate → build → gate • 两道质量门 + 有界返工 + 机械门闩 + 强制处理报告" style="text;html=1;fontSize=11;fontColor=#64748b;align=center;" vertex="1" parent="1">
+          <mxGeometry x="340" y="50" width="720" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 编排器 ══ -->
+        <mxCell id="orch" value="&lt;b&gt;编排器 clean-architecture-autopilot&lt;/b&gt;&lt;br/&gt;状态机 · 产物契约 · 用户循环" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a56db;strokeColor=#1e40af;fontColor=#ffffff;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="490" y="90" width="320" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 泳道标签 ══ -->
+        <mxCell id="lane-phase" value="阶段" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#1e40af;" vertex="1" parent="1">
+          <mxGeometry x="130" y="170" width="60" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lane-gate" value="门" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#b91c1c;" vertex="1" parent="1">
+          <mxGeometry x="133" y="500" width="60" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 阶段 (蓝) ══ -->
+        <mxCell id="P0" value="&lt;b&gt;P0 研究&lt;/b&gt;（可选 · 存量代码库时）&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: Explore / Autopilot Researcher&lt;br/&gt;产出: codebase_notes + 数据质量探查&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1a56db;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="190" width="280" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="P1" value="&lt;b&gt;P1 需求 → 实体/用例&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: ca-requirements-analyst&lt;br/&gt;Skill: ca-use-case-extraction&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1a56db;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="290" width="280" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="P2" value="&lt;b&gt;P2 分层设计&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: ca-architecture-designer&lt;br/&gt;Skill: ca-layer-boundaries · ca-component-principles&lt;br/&gt;DAG 任务 + consumes_contract 前端契约依赖&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1a56db;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="390" width="280" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="P4" value="&lt;b&gt;P4 实现&lt;/b&gt;（由内向外 · 按波并行）&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: ca-clean-implementer ×N（每组件一个）&lt;br/&gt;批量 Red-Green TDD · 测试并入组件批次&lt;br/&gt;agent_dispatch ⇄ component_done 配对计时&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1a56db;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="620" width="280" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="P6" value="&lt;b&gt;P6 收尾&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;report.md 机械处理报告（退出门闩强制）&lt;br/&gt;时间账本 · 组件耗时 · 并行度 · 改动文件&lt;br/&gt;summary.md · 债务签字闭环&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1a56db;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="900" width="280" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 门 (红菱形) ══ -->
+        <mxCell id="G3" value="&lt;b&gt;G3 依赖规则门&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: ca-dependency-auditor&lt;br/&gt;工具: dep_graph.py（AST+Tarjan）&lt;/font&gt;" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="230" y="510" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="G5" value="&lt;b&gt;G5 架构评审门&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Agent: ca-architecture-reviewer&lt;br/&gt;Skill: ca-architecture-review-checklist&lt;br/&gt;实机证据前置：无观察不得判过&lt;/font&gt;" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="230" y="760" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 机械检查器 (紫) ══ -->
+        <mxCell id="CHK" value="&lt;b&gt;机械检查器&lt;/b&gt;（P2 退出门闩）&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;design_coverage.py — 设计源章节覆盖&lt;br/&gt;plan_graph.py — 计划图依赖规则&lt;br/&gt;产物位置契约（plan_artifact / planless）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8ff;strokeColor=#7c3aed;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="395" width="280" height="85" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 日志账本 (灰圆柱) ══ -->
+        <mxCell id="LOG" value="&lt;b&gt;.cc-skill/&amp;lt;slug&amp;gt;/ 运行日志&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;run.jsonl（追加历史）&lt;br/&gt;state.json（当前权威 · cc_log 维护）&lt;br/&gt;manifest.json（init 记录 git 基线）&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#e5e7eb;strokeColor=#374151;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="560" width="240" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ══ USER LOOP (绿) ══ -->
+        <mxCell id="USER" value="&lt;b&gt;USER LOOP 用户决策&lt;/b&gt;&lt;br/&gt;&lt;font style=&quot;font-size:10px&quot;&gt;business_rule · tech_choice&lt;br/&gt;gate_overflow · debt_signoff&lt;br/&gt;（≤4问/次 · 批量 · 权威决策）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="620" y="640" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 终点 ══ -->
+        <mxCell id="DONE" value="&lt;b&gt;DONE&lt;/b&gt;&lt;br/&gt;验收交付" style="ellipse;whiteSpace=wrap;html=1;fillColor=#16a34a;strokeColor=#14532d;fontColor=#ffffff;fontSize=12;strokeWidth=3;" vertex="1" parent="1">
+          <mxGeometry x="250" y="1040" width="180" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 主流程边 ══ -->
+        <mxCell id="e-orch-p0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;" edge="1" parent="1" source="orch" target="P0">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-orch-p1" value="全新（跳过 P0）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#93c5fd;dashed=1;" edge="1" parent="1" source="orch" target="P1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p0-p1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;" edge="1" parent="1" source="P0" target="P1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p1-p2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;" edge="1" parent="1" source="P1" target="P2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p2-g3" value="退出门闩通过" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;fontSize=10;fontColor=#1e40af;" edge="1" parent="1" source="P2" target="G3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-g3-p4" value="APPROVED&#10;（进入门闩：无判决不得入）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#dc2626;fontSize=10;fontColor=#b91c1c;" edge="1" parent="1" source="G3" target="P4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p4-g5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;" edge="1" parent="1" source="P4" target="G5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-g5-p6" value="PASS / PWC+签字" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#1a56db;fontSize=10;fontColor=#1e40af;" edge="1" parent="1" source="G5" target="P6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p6-done" value="report.md 存在" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=2;strokeColor=#16a34a;fontSize=10;fontColor=#14532d;" edge="1" parent="1" source="P6" target="DONE">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ══ 返工回路 (红虚线) ══ -->
+        <mxCell id="e-g3-p2" value="REVISE_REQUIRED&#10;（≤2轮 → 超限升级用户）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#dc2626;dashed=1;fontSize=9;fontColor=#b91c1c;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="G3" target="P2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="90" y="555" />
+              <mxPoint x="90" y="430" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-g5-p4" value="FAIL&#10;（精准 scope 路由 · delta review）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#dc2626;dashed=1;fontSize=9;fontColor=#b91c1c;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="G5" target="P4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="530" y="815" />
+              <mxPoint x="530" y="665" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ══ 机制边 ══ -->
+        <mxCell id="e-p2-chk" value="退出门闩调用" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#7c3aed;dashed=1;fontSize=9;fontColor=#6d28d9;" edge="1" parent="1" source="P2" target="CHK">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-p4-log" value="每事件写入" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#6b7280;fontSize=9;fontColor=#374151;" edge="1" parent="1" source="P4" target="LOG">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="940" y="665" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-p6-log" value="report 汇编" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#6b7280;fontSize=9;fontColor=#374151;exitX=1;exitY=0.5;" edge="1" parent="1" source="P6" target="LOG">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1000" y="945" />
+              <mxPoint x="1000" y="680" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-chk-log" value="判决盖入事件" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1;strokeColor=#9ca3af;dotted=1;fontSize=9;fontColor=#6b7280;" edge="1" parent="1" source="CHK" target="LOG">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="940" y="437" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ══ 用户循环边 (绿虚线) ══ -->
+        <mxCell id="e-p1-user" value="①② 触发" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#16a34a;dashed=1;fontSize=9;fontColor=#15803d;exitX=1;exitY=0.5;entryX=0;entryY=0.25;" edge="1" parent="1" source="P1" target="USER">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="560" y="325" />
+              <mxPoint x="580" y="663" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-g5-user" value="③④ 触发" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#16a34a;dashed=1;fontSize=9;fontColor=#15803d;exitX=1;exitY=0.75;entryX=0.5;entryY=0;" edge="1" parent="1" source="G5" target="USER">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="340" y="730" />
+              <mxPoint x="740" y="730" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-user-orch" value="权威决策" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeWidth=1.5;strokeColor=#16a34a;dashed=1;fontSize=9;fontColor=#15803d;exitX=0.5;exitY=0;entryX=0.75;entryY=1;" edge="1" parent="1" source="USER" target="orch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ══ 图例 ══ -->
+        <mxCell id="legend-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cbd5e1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="880" width="320" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" value="图例" style="text;html=1;fontSize=12;fontStyle=1;fontColor=#1e293b;" vertex="1" parent="1">
+          <mxGeometry x="640" y="890" width="60" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-phase" value="阶段（蓝）— 流水线主流程" style="text;html=1;fontSize=10;fontColor=#1e40af;" vertex="1" parent="1">
+          <mxGeometry x="640" y="915" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-gate" value="门（红菱形）— 质量闸口 + 返工回路" style="text;html=1;fontSize=10;fontColor=#b91c1c;" vertex="1" parent="1">
+          <mxGeometry x="640" y="938" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-chk" value="机械检查器（紫虚线）— P2 退出门闩" style="text;html=1;fontSize=10;fontColor=#6d28d9;" vertex="1" parent="1">
+          <mxGeometry x="640" y="961" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-user" value="USER LOOP（绿虚线）— 权威决策回到编排器" style="text;html=1;fontSize=10;fontColor=#15803d;" vertex="1" parent="1">
+          <mxGeometry x="640" y="984" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-log" value="运行日志（灰）— append-only 账本" style="text;html=1;fontSize=10;fontColor=#374151;" vertex="1" parent="1">
+          <mxGeometry x="640" y="1007" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-solid" value="实线 = 主流程　虚线 = 返工/触发　点线 = 记录" style="text;html=1;fontSize=10;fontColor=#475569;" vertex="1" parent="1">
+          <mxGeometry x="640" y="1030" width="280" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="lg-src" value="证据: SKILL.md v1.10.0 + cc_log.py 门闩常量" style="text;html=1;fontSize=9;fontColor=#94a3b8;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="640" y="1060" width="280" height="18" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
