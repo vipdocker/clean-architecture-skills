@@ -1,6 +1,6 @@
 # Clean Architecture Skill & Agent System
 
-**System version: 1.8.0** ｜ 所有 skill 与 agent 版本统一为 `1.8.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
+**System version: 1.10.0** ｜ 所有 skill 与 agent 版本统一为 `1.10.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
@@ -25,26 +25,28 @@ clean-code/
 ├── uninstall.sh                               一键反安装（只清本项目的文件）
 ├── skills/                                     方法论（Agent 调用的知识）
 │   ├── clean-architecture-autopilot/SKILL.md   ★ 总控编排器：状态机+dispatch+质量门+增强映射
-│   ├── use-case-extraction/SKILL.md            从需求提炼 实体 / 用例
-│   ├── layer-boundaries/SKILL.md               四层定义、边界 DTO、边界粒度、尖叫架构
-│   ├── dependency-rule/SKILL.md                依赖规则 + DIP 跨界 + Humble Object
-│   ├── solid-principles/SKILL.md               SRP/OCP/LSP/ISP/DIP（类级）
-│   ├── component-principles/SKILL.md           REP/CCP/CRP + ADP/SDP/SAP（组件级）
-│   ├── architecture-review-checklist/SKILL.md  质量门评审清单 + 严重度校准
-│   └── process-tuning/SKILL.md                 流程复盘调优：项目目录(+日志)→调优报告
+│   ├── ca-use-case-extraction/SKILL.md            从需求提炼 实体 / 用例
+│   ├── ca-layer-boundaries/SKILL.md               四层定义、边界 DTO、边界粒度、尖叫架构
+│   ├── ca-dependency-rule/SKILL.md                依赖规则 + DIP 跨界 + Humble Object
+│   ├── ca-solid-principles/SKILL.md               SRP/OCP/LSP/ISP/DIP（类级）
+│   ├── ca-component-principles/SKILL.md           REP/CCP/CRP + ADP/SDP/SAP（组件级）
+│   ├── ca-architecture-review-checklist/SKILL.md  质量门评审清单 + 严重度校准
+│   └── ca-process-tuning/SKILL.md                 流程复盘调优：项目目录(+日志)→调优报告
 ├── agents/                                     角色（谁在什么阶段做什么）
-│   ├── requirements-analyst.md                 阶段1：需求 → 实体/用例
-│   ├── architecture-designer.md                阶段2：分层、端口、组件图、目录
-│   ├── dependency-auditor.md                   阶段3：依赖规则 + 无环 门（GATE）
-│   ├── clean-implementer.md                    阶段4：由内向外实现，自校验
-│   └── architecture-reviewer.md                阶段5：全量评审 门（GATE）
+│   ├── ca-requirements-analyst.md                 阶段1：需求 → 实体/用例
+│   ├── ca-architecture-designer.md                阶段2：分层、端口、组件图、目录
+│   ├── ca-dependency-auditor.md                   阶段3：依赖规则 + 无环 门（GATE）
+│   ├── ca-clean-implementer.md                    阶段4：由内向外实现，自校验
+│   └── ca-architecture-reviewer.md                阶段5：全量评审 门（GATE）
 └── pipeline/
     ├── orchestration.md                        DAG 流程、质量门、反馈回路、并行策略
     ├── flow.mermaid                            处理流程图源（每环节的 Agent/Skill/增强）
     └── flow.png                                流程图高清 PNG
 ```
 
-**三层心智模型**：`skills/` 是"知识"，`agents/` 是"用知识的人"，`pipeline/` 是"怎么把人排成流水线"。一个 Skill 可被多个 Agent 复用（例如 `dependency-rule` 同时服务审计员和实现者）。
+**三层心智模型**：`skills/` 是"知识"，`agents/` 是"用知识的人"，`pipeline/` 是"怎么把人排成流水线"。一个 Skill 可被多个 Agent 复用（例如 `ca-dependency-rule` 同时服务审计员和实现者）。
+
+**命名约定（v1.9.0 起）**：7 个方法论 skill 统一带 `ca-` 前缀（`ca-dependency-rule`、`ca-process-tuning`…），5 个 agent 同样带 `ca-` 前缀（`ca-requirements-analyst`、`ca-architecture-reviewer`…）——skill 目录装进的是**平铺共享命名空间**（`~/.agents/skills/`），agent 名会进入共享的 agent 派发清单，通用名（如 `solid-principles`、`clean-implementer`）容易与第三方包撞名互相遮蔽；总控编排器 `clean-architecture-autopilot` 不加前缀，它就是包名锚点（agents 的安装子目录与之同名）。
 
 ---
 
@@ -52,11 +54,11 @@ clean-code/
 
 | 阶段 | Agent | 职责 | 调用的 Skill | 对应书中章节 |
 |---|---|---|---|---|
-| 1 | 需求分析师 | 把需求拆成**实体（企业规则）**与**用例（应用规则）**，推迟一切技术选型 | use-case-extraction | Business Rules |
-| 2 | 架构设计师 | 分层归位、定义端口与边界 DTO、选边界粒度、画组件图、给出**尖叫式目录** | layer-boundaries · component-principles · solid-principles | Boundaries / Screaming Architecture |
-| 3 | 依赖规则审计员（门） | 写码前证明**依赖全部朝内 + 组件图无环**，否则打回 | dependency-rule · component-principles | The Dependency Rule / Component Coupling |
-| 4 | 整洁实现者 | 由内向外实现：实体→用例→适配器→框架，只在 `main` 装配具体实现 | dependency-rule · solid-principles · layer-boundaries | Humble Object / Main Component |
-| 5 | 架构评审员（门） | 用完整清单打分，出 PASS / PASS_WITH_CONCERNS / FAIL | architecture-review-checklist（+ 三个深入 skill） | 全书作为验收标准 |
+| 1 | 需求分析师 | 把需求拆成**实体（企业规则）**与**用例（应用规则）**，推迟一切技术选型 | ca-use-case-extraction | Business Rules |
+| 2 | 架构设计师 | 分层归位、定义端口与边界 DTO、选边界粒度、画组件图、给出**尖叫式目录** | ca-layer-boundaries · ca-component-principles · ca-solid-principles | Boundaries / Screaming Architecture |
+| 3 | 依赖规则审计员（门） | 写码前证明**依赖全部朝内 + 组件图无环**，否则打回 | ca-dependency-rule · ca-component-principles | The Dependency Rule / Component Coupling |
+| 4 | 整洁实现者 | 由内向外实现：实体→用例→适配器→框架，只在 `main` 装配具体实现 | ca-dependency-rule · ca-solid-principles · ca-layer-boundaries | Humble Object / Main Component |
+| 5 | 架构评审员（门） | 用完整清单打分，出 PASS / PASS_WITH_CONCERNS / FAIL | ca-architecture-review-checklist（+ 三个深入 skill） | 全书作为验收标准 |
 
 ---
 
@@ -115,11 +117,11 @@ clean-code/
 | 环节 | 本地 Skill | 增强 Superpowers Skill | 增强 Agent |
 |---|---|---|---|
 | P0 研究(可选) | — | find-skills, context7 | Explore, Autopilot Researcher |
-| P1 需求 | use-case-extraction | **brainstorming**(必做), feature-spec | general-purpose |
-| P2 设计 | layer-boundaries 等 | writing-plans, plan-eng-review | Plan, Autopilot Designer/Planner |
-| G3 依赖门 | dependency-rule | **ast-code-analysis-superpower**(ast-grep 机扫违规/环) | Explore |
-| P4 实现 | dependency-rule 等 | test-driven-development, executing-plans, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
-| G5 评审门 | architecture-review-checklist | requesting-code-review, ast-code-analysis-superpower, codex(对抗), review | Autopilot Code Reviewer |
+| P1 需求 | ca-use-case-extraction | **brainstorming**(必做), feature-spec | general-purpose |
+| P2 设计 | ca-layer-boundaries 等 | writing-plans, plan-eng-review | Plan, Autopilot Designer/Planner |
+| G3 依赖门 | ca-dependency-rule | **ast-code-analysis-superpower**(ast-grep 机扫违规/环) | Explore |
+| P4 实现 | ca-dependency-rule 等 | test-driven-development, executing-plans, dispatching-parallel-agents, using-git-worktrees, systematic-debugging/investigate, verification-before-completion | Autopilot Implementer |
+| G5 评审门 | ca-architecture-review-checklist | requesting-code-review, ast-code-analysis-superpower, codex(对抗), review | Autopilot Code Reviewer |
 | P6 收尾 | — | receiving-code-review, finishing-a-development-branch, ship | — |
 
 几个关键增益点：P1 的 `brainstorming` 确保不先入为主建错模型；G3 用 `ast-code-analysis-superpower`
@@ -129,9 +131,9 @@ clean-code/
 
 ---
 
-## 3.7 流程复盘调优：process-tuning
+## 3.7 流程复盘调优：ca-process-tuning
 
-`skills/process-tuning/SKILL.md` 回答的是和架构评审**不同**的问题——评审问"产出的代码好不好"，
+`skills/ca-process-tuning/SKILL.md` 回答的是和架构评审**不同**的问题——评审问"产出的代码好不好"，
 调优问"这条流程本身跑得好不好、下次该改哪里"。它把 `.cc-skill/` 日志设计的价值闭环起来。
 
 - **输入**：做完的项目目录（必给）+ 该任务的 `.cc-skill/<任务简述>/` 日志（可选但强烈推荐）。
@@ -154,16 +156,16 @@ clean-code/
 ## 4. 如何使用
 
 ### 方式 A：作为人工检查清单 / 团队规范
-直接把 `skills/*/SKILL.md` 当作评审手册。做设计评审时按 `architecture-review-checklist` 逐条打分；做模块拆分时用 `component-principles` 算 `I / A / D`；判断某个类放哪层时用 `dependency-rule` 的"放置决策流程"。
+直接把 `skills/*/SKILL.md` 当作评审手册。做设计评审时按 `ca-architecture-review-checklist` 逐条打分；做模块拆分时用 `ca-component-principles` 算 `I / A / D`；判断某个类放哪层时用 `ca-dependency-rule` 的"放置决策流程"。
 
 ### 方式 B：驱动你的 AI 编码 Agent（推荐）
 按流水线阶段，逐段把对应的 Agent 定义 + Skill 内容喂给你的编码助手：
 
-1. **阶段 1**：贴上 `agents/requirements-analyst.md` + `skills/use-case-extraction/SKILL.md`，附上你的需求 / PRD / 用户故事。产出实体、用例、被推迟的技术细节、待澄清问题。
-2. **阶段 2**：把上一步的产出连同 `agents/architecture-designer.md` + 三个设计类 skill 一起喂入。产出分层图、端口、边界 DTO、组件图、目录树、设计说明。
-3. **阶段 3（门）**：用 `agents/dependency-auditor.md` 审计设计。若 `REVISE_REQUIRED`，带着精确的违规点回到阶段 2（最多 2 轮，仍不过就把歧义抛给你决策）。
-4. **阶段 4**：`APPROVED` 后，用 `agents/clean-implementer.md` **由内向外**逐层实现，每层做导入方向自校验 + 单元测试。组件图无环，所以独立组件可并行实现。
-5. **阶段 5（门）**：用 `agents/architecture-reviewer.md` 跑完整清单。BLOCKER 必须清零；MAJOR 只能在你签字后作为技术债接受。
+1. **阶段 1**：贴上 `agents/ca-requirements-analyst.md` + `skills/ca-use-case-extraction/SKILL.md`，附上你的需求 / PRD / 用户故事。产出实体、用例、被推迟的技术细节、待澄清问题。
+2. **阶段 2**：把上一步的产出连同 `agents/ca-architecture-designer.md` + 三个设计类 skill 一起喂入。产出分层图、端口、边界 DTO、组件图、目录树、设计说明。
+3. **阶段 3（门）**：用 `agents/ca-dependency-auditor.md` 审计设计。若 `REVISE_REQUIRED`，带着精确的违规点回到阶段 2（最多 2 轮，仍不过就把歧义抛给你决策）。
+4. **阶段 4**：`APPROVED` 后，用 `agents/ca-clean-implementer.md` **由内向外**逐层实现，每层做导入方向自校验 + 单元测试。组件图无环，所以独立组件可并行实现。
+5. **阶段 5（门）**：用 `agents/ca-architecture-reviewer.md` 跑完整清单。BLOCKER 必须清零；MAJOR 只能在你签字后作为技术债接受。
 
 ### 方式 C：一键安装到本机 Skill 运行环境（Qoder / qoderwork 用户推荐）
 在仓库根目录执行：

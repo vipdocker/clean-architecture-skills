@@ -1,8 +1,8 @@
 ---
-name: use-case-extraction
-description: Extracts Entities and Use Cases from raw requirements the Clean Architecture way — separating enterprise business rules (Entities) from application business rules (Use Cases), and defining request/response models plus the interactor for each. Use at the start of a design, when turning a PRD/feature request/user story into a policy-first model before choosing any framework or database. Language-agnostic. Not for layering an already-extracted model (use layer-boundaries), for writing a general PRD or feature spec, or for reviewing finished code (use architecture-review-checklist).
+name: ca-use-case-extraction
+description: Extracts Entities and Use Cases from raw requirements the Clean Architecture way — separating enterprise business rules (Entities) from application business rules (Use Cases), and defining request/response models plus the interactor for each. Use at the start of a design, when turning a PRD/feature request/user story into a policy-first model before choosing any framework or database. Language-agnostic. Not for layering an already-extracted model (use ca-layer-boundaries), for writing a general PRD or feature spec, or for reviewing finished code (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.8.0 -->
+<!-- clean-architecture system v1.10.0 -->
 
 # Use Case & Entity Extraction
 
@@ -89,4 +89,4 @@ Emit:
   deferred_details: [{requirement, restated_as_port}]
 }
 ```
-This artifact is the input to `layer-boundaries` and the architecture design phase.
+This artifact is the input to `ca-layer-boundaries` and the architecture design phase.

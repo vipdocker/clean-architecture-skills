@@ -1,8 +1,8 @@
 ---
-name: architecture-review-checklist
-description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use layer-boundaries), for the cheaper pre-code dependency-direction audit (use dependency-rule), or for judging whether the PROCESS itself needs tuning (use process-tuning).
+name: ca-architecture-review-checklist
+description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use ca-layer-boundaries), for the cheaper pre-code dependency-direction audit (use ca-dependency-rule), or for judging whether the PROCESS itself needs tuning (use ca-process-tuning).
 ---
-<!-- clean-architecture system v1.8.0 -->
+<!-- clean-architecture system v1.10.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 
@@ -70,14 +70,14 @@ follow-up review.
 - [ ] Data crossing boundaries is inner-defined DTOs (no ORM rows / HTTP / UI leaking inward).
 - [ ] Concretions are wired only in `main`/composition root.
 
-## Section B — SOLID (see `solid-principles`)
+## Section B — SOLID (see `ca-solid-principles`)
 - [ ] SRP: each class has exactly one actor / reason to change.
 - [ ] OCP: expected variations are added, not edited (abstractions in place).
 - [ ] LSP: no `instanceof`/type-switch ladders; implementations are substitutable.
 - [ ] ISP: no client depends on interface methods it doesn't use.
 - [ ] DIP: source dependencies point at stable abstractions.
 
-## Section C — Component Cohesion & Coupling (see `component-principles`)
+## Section C — Component Cohesion & Coupling (see `ca-component-principles`)
 - [ ] CCP: classes in a component change for the same reason/time.
 - [ ] CRP: no component drags classes its clients don't need.
 - [ ] REP: each component is independently releasable/versioned.
@@ -85,7 +85,7 @@ follow-up review.
 - [ ] SDP: instability `I` decreases along every dependency arrow.
 - [ ] SAP: stable components are abstract; no component in Zone of Pain/Uselessness (`D`→0).
 
-## Section D — Boundaries & Layout (see `layer-boundaries`)
+## Section D — Boundaries & Layout (see `ca-layer-boundaries`)
 - [ ] Boundary granularity matches the real axis of change (facade / one-dim / full).
 - [ ] Screaming architecture: top-level dirs name the domain, not the framework.
 - [ ] Framework/DB/UI are plugins at the edge; decisions deferred correctly.

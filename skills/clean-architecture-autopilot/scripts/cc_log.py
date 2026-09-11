@@ -48,6 +48,11 @@ Usage:
   # 4) write summary.md at DONE
   python3 cc_log.py summary --root <project_dir> --slug <task-slug> --body-file <path>
 
+  # 5) generate report.md at DONE — the mechanical processing report (time
+  #    ledger, per-component cost, parallelism, user wait, gate verdicts,
+  #    signed-off debts, git change list). phase_exit P6 is REFUSED without it.
+  python3 cc_log.py report --root <project_dir> --slug <task-slug>
+
 Notes:
 - Never mutates prior run.jsonl lines (append-only). state.json is overwritten
   atomically (temp file + os.replace).
@@ -55,7 +60,7 @@ Notes:
   records the resolved path in manifest.json.resolved_root.
 - Secrets: this script writes exactly what you pass; do not pass tokens/keys.
 """
-import argparse, json, os, sys, tempfile, time, datetime, re
+import argparse, json, os, subprocess, sys, tempfile, time, datetime, re
 
 
 class CCLogError(Exception):
@@ -206,6 +211,18 @@ def load_state(run_dir):
             return {}
     return {}
 
+def _git_out(root, *args):
+    """Run git in <root>, return stripped stdout or None. The report shells out
+    for the change list; git being absent or the dir not being a repo must
+    degrade to a note, never a traceback."""
+    try:
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                           text=True, timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def cmd_init(a):
     slug = a.slug or slugify(a.title)
     run_dir = resolve_dir(a.root, slug)
@@ -214,9 +231,14 @@ def cmd_init(a):
         run_dir = run_dir + "-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     os.makedirs(os.path.join(run_dir, "artifacts"), exist_ok=True)
     run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + slug
+    # The commit this run started from: the report's "changed files" section
+    # diffs against it, so the list is this run's work rather than whatever
+    # happens to be uncommitted when the report runs.
+    baseline = _git_out(a.root, "rev-parse", "HEAD")
     manifest = {
         "run_id": run_id, "task_title": a.title or slug, "slug": slug,
         "start": now_iso(), "end": None, "resolved_root": os.path.abspath(run_dir),
+        "baseline_commit": baseline,
         "config": {"max_parallel": a.max_parallel},
     }
     atomic_write(os.path.join(run_dir, "manifest.json"),
@@ -743,6 +765,26 @@ def cmd_event(a):
             violations.append({
                 "rule": "P6 may not close while debts await user sign-off",
                 "actual": f"{len(unsigned)} unsigned debt(s): {unsigned}"})
+        # The run's closing report is mechanical, like every other gated
+        # artifact. Runs 3–5 each finished with a different hand-assembled
+        # artifact (or none); without this latch the report would be optional,
+        # and optional steps drift.
+        if not os.path.exists(os.path.join(run_dir, "report.md")):
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log phase_exit P6: {run_dir}/report.md does "
+                    f"not exist. Generate the mechanical processing report "
+                    f"before closing the run:\n"
+                    f"  python3 cc_log.py report --root <project_dir> "
+                    f"--slug <task-slug>\n"
+                    f"It assembles the time ledger, per-component cost, "
+                    f"parallelism, user wait, gate verdicts, signed-off debts "
+                    f"and the git change list from the logs — never "
+                    f"hand-written. If the bypass is intentional, re-run "
+                    f"with --force.")
+            violations.append({
+                "rule": "P6 exit requires a generated report.md",
+                "actual": f"no report.md in {run_dir}"})
 
     # --- PASS_WITH_CONCERNS must name its concerns ------------------------
     # The verdict means "passing, but with debts the user must accept". A PWC that
@@ -1347,6 +1389,253 @@ def cmd_summary(a):
                   "summary.md was written", file=sys.stderr)
     print("summary written ->", run_dir)
 
+
+def _fmt_dur(ms):
+    if ms is None:
+        return "—"
+    if ms >= 3_600_000:
+        return f"{ms / 3_600_000:.1f}h"
+    if ms >= 60_000:
+        return f"{ms / 60_000:.1f}m"
+    return f"{ms / 1000:.1f}s"
+
+
+def _load_events(run_dir):
+    p = os.path.join(run_dir, "run.jsonl")
+    if not os.path.exists(p):
+        raise CCLogError(f"cannot report: no run.jsonl in {run_dir}")
+    events = []
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    if not events:
+        raise CCLogError(f"cannot report: {p} has no readable events")
+    return events
+
+
+def cmd_report(a):
+    """Generate report.md — the mechanical processing report at DONE.
+
+    Everything here is assembled from run.jsonl + state.json + git, never
+    hand-written: the time ledger, per-component cost, parallelism, user wait,
+    gate verdicts, signed-off debts and the change list. P6's exit latch
+    refuses to close a run without this file, for the same reason every other
+    artifact is gated — prose doesn't hold.
+    """
+    run_dir = _find_run_dir(a.root, a.slug)
+    st = load_state(run_dir)
+    events = _load_events(run_dir)
+
+    t0, t1 = _parse_ts(events[0].get("ts")), _parse_ts(events[-1].get("ts"))
+    wall_ms = int((t1 - t0).total_seconds() * 1000) if (t0 and t1) else None
+
+    # --- per-phase: recorded (pause-corrected) vs raw (enter→exit timestamps)
+    phase_rec, phase_raw, enter_ts = {}, {}, {}
+    for e in events:
+        ph, ev = e.get("phase"), e.get("event")
+        if ev == "phase_enter":
+            enter_ts[ph] = e.get("ts")
+        elif ev == "phase_exit":
+            if e.get("duration_ms") is not None:
+                phase_rec[ph] = e["duration_ms"]
+            s, x = _parse_ts(enter_ts.get(ph)), _parse_ts(e.get("ts"))
+            if s and x:
+                phase_raw[ph] = int((x - s).total_seconds() * 1000)
+
+    # --- per-component: same two views, from dispatch to done
+    dispatch_ts, comp = {}, {}
+    for e in events:
+        ev, det = e.get("event"), e.get("detail") or {}
+        name = det.get("component") or det.get("task")
+        if not name:
+            continue
+        if ev == "agent_dispatch":
+            dispatch_ts[name] = e.get("ts")
+        elif ev == "component_done":
+            rec = {"status": det.get("status", "DONE")}
+            if e.get("duration_ms") is not None:
+                rec["rec"] = e["duration_ms"]
+            s, x = _parse_ts(dispatch_ts.get(name)), _parse_ts(e.get("ts"))
+            if s and x:
+                rec["raw"] = int((x - s).total_seconds() * 1000)
+            if det.get("tests"):
+                rec["tests"] = det["tests"]
+            comp[name] = rec
+
+    # --- user wait: each user_loop → the next non-pause event (the answer)
+    user_wait_ms, user_pause_count, questions = 0, 0, 0
+    for i, e in enumerate(events):
+        if e.get("event") != "user_loop":
+            continue
+        user_pause_count += 1
+        q = (e.get("detail") or {}).get("questions")
+        questions += len(q) if isinstance(q, list) else 1
+        for f in events[i + 1:]:
+            if f.get("event") == "pause":
+                continue
+            s, x = _parse_ts(e.get("ts")), _parse_ts(f.get("ts"))
+            if s and x:
+                user_wait_ms += int((x - s).total_seconds() * 1000)
+            break
+
+    # --- pauses: only idle-credited ones count as idle
+    idle_ms, inflight_gaps = 0, 0
+    for e in events:
+        if e.get("event") == "pause":
+            det = e.get("detail") or {}
+            if det.get("credited_to_idle", True):
+                idle_ms += det.get("gap_ms") or 0
+            else:
+                inflight_gaps += 1
+
+    # --- parallelism from RAW values: recorded durations can carry accounting
+    # bugs (run 5's T4 recorded 0m against a raw 37.8m); timestamps cannot.
+    comp_raw_sum = sum(r.get("raw") or 0 for r in comp.values())
+    p4_raw = phase_raw.get("P4")
+    parallel = (comp_raw_sum / p4_raw) if (p4_raw and comp_raw_sum) else None
+
+    def _flag(rec, raw):
+        if rec is None or raw is None:
+            return ""
+        if raw > 60_000 and abs(raw - rec) > max(60_000, 0.2 * raw):
+            return " ⚠"
+        return ""
+
+    # --- git change list, diffed against the run's baseline commit
+    manifest = {}
+    mp = os.path.join(run_dir, "manifest.json")
+    if os.path.exists(mp):
+        try:
+            manifest = json.load(open(mp, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+    baseline = manifest.get("baseline_commit")
+    ref = baseline or "HEAD"
+    shortstat = _git_out(a.root, "diff", "--shortstat", ref)
+    numstat = _git_out(a.root, "diff", "--numstat", ref) or ""
+    plus_del = {}
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            plus_del[parts[2]] = (parts[0], parts[1])
+    porcelain = _git_out(a.root, "status", "--porcelain") or ""
+    new_files, new_lines = [], 0
+    for line in porcelain.splitlines():
+        if not line.startswith("??"):
+            continue
+        path = line[3:]
+        if path.startswith(".cc-skill"):
+            continue
+        new_files.append(path)
+        try:
+            with open(os.path.join(a.root, path), encoding="utf-8",
+                      errors="ignore") as f:
+                new_lines += sum(1 for _ in f)
+        except OSError:
+            pass
+
+    L = []
+    L.append(f"# 处理报告 — {st.get('task_title', a.slug)}")
+    L.append("")
+    L.append(f"- **run_id**: `{st.get('run_id')}`")
+    L.append(f"- **运行区间**: {events[0].get('ts')} → {events[-1].get('ts')}"
+             f"（墙钟 **{_fmt_dur(wall_ms)}**）")
+    baseline_note = baseline or "（init 时未记录，diff 针对 HEAD）"
+    L.append(f"- **基线提交**: `{baseline_note}`")
+    L.append(f"- **生成时间**: {now_iso()}")
+    L.append("")
+    L.append("## 时间账本")
+    L.append("")
+    L.append("| 维度 | 数值 |")
+    L.append("|---|---|")
+    L.append(f"| 墙钟 | {_fmt_dur(wall_ms)} |")
+    L.append(f"| 用户等待（user_loop → 应答，{user_pause_count} 次 / "
+             f"{questions} 问） | {_fmt_dur(user_wait_ms)} |")
+    L.append(f"| 空转（pause·计为空闲） | {_fmt_dur(idle_ms)} |")
+    if inflight_gaps:
+        L.append(f"| 在制静默（pause·未计空闲，见 F1 修复说明） | {inflight_gaps} 段 |")
+    if parallel:
+        L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x |")
+    L.append("")
+    L.append("### 各阶段耗时")
+    L.append("")
+    L.append("| 阶段 | 记录耗时¹ | 墙钟 |")
+    L.append("|---|---|---|")
+    for ph in ["P0", "P1", "P2", "G3", "P4", "G5", "P6"]:
+        if ph in phase_rec or ph in phase_raw:
+            L.append(f"| {ph} | {_fmt_dur(phase_rec.get(ph))}"
+                     f"{_flag(phase_rec.get(ph), phase_raw.get(ph))}"
+                     f" | {_fmt_dur(phase_raw.get(ph))} |")
+    L.append("")
+    if comp:
+        L.append("### 组件耗时")
+        L.append("")
+        L.append("| 组件 | 状态 | 记录耗时¹ | 墙钟 | 测试 |")
+        L.append("|---|---|---|---|---|")
+        for name, r in comp.items():
+            L.append(f"| {name} | {r['status']} | {_fmt_dur(r.get('rec'))}"
+                     f"{_flag(r.get('rec'), r.get('raw'))}"
+                     f" | {_fmt_dur(r.get('raw'))} | {r.get('tests', '—')} |")
+        L.append("")
+        L.append("¹ 记录耗时 = pause 校正值；标 ⚠ 表示与墙钟偏差超过 20% —— 通常是"
+                 "旧版本日志的 pause 记账误差或事件分批补写，以墙钟列为准。")
+        L.append("")
+    gv = st.get("gate_verdicts") or {}
+    loops = st.get("loops") or {}
+    L.append("## 门与裁决")
+    L.append("")
+    L.append(f"- **G3 依赖审计**: {gv.get('g3')}（{loops.get('gate3_iterations', 0)} 轮迭代）")
+    L.append(f"- **G5 架构评审**: {gv.get('g5')}（{loops.get('gate5_iterations', 0)} 轮迭代）")
+    signed = st.get("debts_signed_off") or []
+    if signed:
+        L.append(f"- **已签字债务**: {len(signed)} 项")
+        for d in signed:
+            L.append(f"  - {d}")
+    if st.get("debts"):
+        L.append(f"- **未签字债务**: {len(st['debts'])} 项 ⚠（P6 出口门闩应已拦截）")
+    ledger = st.get("question_ledger")
+    if ledger:
+        L.append(f"- **提问账本**: 询问 {ledger.get('asked', 0)} / "
+                 f"自答 {ledger.get('self_resolved', 0)}")
+    L.append("")
+    L.append("## 改动文件")
+    L.append("")
+    if shortstat is None and not new_files:
+        L.append("（git 不可用或非 git 仓库 —— 文件清单无法生成）")
+    else:
+        if shortstat:
+            L.append(f"相对基线 `{ref[:12] if ref != 'HEAD' else 'HEAD'}`：{shortstat}")
+        else:
+            L.append(f"相对基线 `{ref[:12] if ref != 'HEAD' else 'HEAD'}`：无已跟踪文件改动")
+        if new_files:
+            L.append("")
+            L.append(f"新增 {len(new_files)} 个文件，共 {new_lines} 行：")
+            L.append("")
+            for path in new_files:
+                L.append(f"- `{path}`")
+        if plus_del:
+            L.append("")
+            L.append("| 文件 | +行 | −行 |")
+            L.append("|---|---|---|")
+            for path, (p, d) in sorted(plus_del.items()):
+                if path.startswith(".cc-skill"):
+                    continue
+                L.append(f"| `{path}` | {p} | {d} |")
+        L.append("")
+        L.append("> 注意：清单为基线以来的全部工作区改动；若基线前已有未提交工作，"
+                 "可能混入本次运行之外的文件。")
+    L.append("")
+    out = os.path.join(run_dir, "report.md")
+    atomic_write(out, "\n".join(L) + "\n")
+    print(f"report written -> {out}")
+    print(f"  wall {_fmt_dur(wall_ms)} | user wait {_fmt_dur(user_wait_ms)} | "
+          f"idle {_fmt_dur(idle_ms)}"
+          + (f" | parallel {parallel:.2f}x" if parallel else "")
+          + f" | {len(comp)} components | {len(new_files)} new files")
+
 def main():
     p = argparse.ArgumentParser(prog="cc_log.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1377,6 +1666,9 @@ def main():
     pm = sub.add_parser("summary"); pm.set_defaults(fn=cmd_summary)
     pm.add_argument("--root", required=True); pm.add_argument("--slug", required=True)
     pm.add_argument("--body-file", dest="body_file", default=None)
+
+    pr = sub.add_parser("report"); pr.set_defaults(fn=cmd_report)
+    pr.add_argument("--root", required=True); pr.add_argument("--slug", required=True)
 
     a = p.parse_args()
     try:

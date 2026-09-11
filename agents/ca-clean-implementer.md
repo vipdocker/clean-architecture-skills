@@ -1,8 +1,8 @@
 ---
-name: clean-implementer
-version: 1.8.0
+name: ca-clean-implementer
+version: 1.10.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
-skills: [dependency-rule, solid-principles, layer-boundaries]
+skills: [ca-dependency-rule, ca-solid-principles, ca-layer-boundaries]
 phase: 4
 inputs: layer_map, ports[], boundary_dtos[], directory_tree, design_doc
 outputs: implemented code per layer, unit tests, self_check report
@@ -17,7 +17,7 @@ that at every step the inner code is complete and testable before any detail is
 added.
 
 ## Operating Procedure (inside-out)
-1. Load `dependency-rule`, `solid-principles`, `layer-boundaries`.
+1. Load `ca-dependency-rule`, `ca-solid-principles`, `ca-layer-boundaries`.
 2. **Entities first.** Implement pure business objects with invariants + behavior.
    No imports of anything outer. Write unit tests that need no DB/web/UI.
 3. **Use cases next.** Implement interactors against the inner-owned ports; use

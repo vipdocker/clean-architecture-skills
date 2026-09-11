@@ -1,8 +1,8 @@
 ---
-name: solid-principles
-description: Applies the five SOLID class-design principles (SRP, OCP, LSP, ISP, DIP) from Robert C. Martin's Clean Architecture. Use when designing or reviewing class/module structure, deciding where to place responsibilities, choosing interfaces, or resolving rigidity/fragility smells. Language-agnostic. Not for component/package-level cohesion and coupling (use component-principles), for cross-layer dependency direction (use dependency-rule), or for assigning code to the four layers (use layer-boundaries).
+name: ca-solid-principles
+description: Applies the five SOLID class-design principles (SRP, OCP, LSP, ISP, DIP) from Robert C. Martin's Clean Architecture. Use when designing or reviewing class/module structure, deciding where to place responsibilities, choosing interfaces, or resolving rigidity/fragility smells. Language-agnostic. Not for component/package-level cohesion and coupling (use ca-component-principles), for cross-layer dependency direction (use ca-dependency-rule), or for assigning code to the four layers (use ca-layer-boundaries).
 ---
-<!-- clean-architecture system v1.8.0 -->
+<!-- clean-architecture system v1.10.0 -->
 
 # SOLID Principles (Class-Level Design)
 
@@ -72,7 +72,7 @@ Litmus: "Does any client of this interface use less than half of its methods?"
 "Depend on abstractions, not on concretions." High-level policy must not depend on
 low-level detail; both depend on abstractions.
 
-This is the engine behind the Dependency Rule (see `dependency-rule` skill). The
+This is the engine behind the Dependency Rule (see `ca-dependency-rule` skill). The
 abstraction (interface) is *owned by the caller's layer*; the implementation lives
 in an outer layer and is injected.
 

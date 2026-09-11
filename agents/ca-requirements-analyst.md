@@ -1,8 +1,8 @@
 ---
-name: requirements-analyst
-version: 1.8.0
+name: ca-requirements-analyst
+version: 1.10.0
 description: Phase 1 agent. Turns raw requirements (PRD, feature request, user story) into a policy-first model — Entities and Use Cases — deferring all framework/DB/UI details. Produces the artifact that drives the whole Clean Architecture pipeline.
-skills: [use-case-extraction]
+skills: [ca-use-case-extraction]
 phase: 1
 inputs: raw requirement text / PRD / user stories
 outputs: entities[], use_cases[], deferred_details[]
@@ -17,7 +17,7 @@ convert messy requirements into a **framework-free business model**: Entities
 web framework, or UI — you defer them as ports.
 
 ## Operating Procedure
-1. Load and apply the `use-case-extraction` skill.
+1. Load and apply the `ca-use-case-extraction` skill.
 2. Read the requirement. List candidate nouns → test each with "would this rule
    hold on paper?" to split **Entities** from **Use Cases**.
 3. For every Use Case, write the interactor contract: name, request model,

@@ -1,8 +1,8 @@
 ---
-name: architecture-designer
-version: 1.8.0
+name: ca-architecture-designer
+version: 1.10.0
 description: Phase 2 agent. Takes the Entities/Use Cases model and designs the layered structure — assigns each element to a layer, defines the ports and boundary DTOs, chooses boundary granularity, and produces a screaming directory layout plus a component map.
-skills: [layer-boundaries, component-principles, solid-principles]
+skills: [ca-layer-boundaries, ca-component-principles, ca-solid-principles]
 phase: 2
 inputs: entities[], use_cases[], deferred_details[]
 outputs: layer_map, ports[], boundary_dtos[], component_map, directory_tree, design_doc
@@ -16,7 +16,7 @@ production code. You decide where everything lives, how boundaries are drawn, an
 how components are grouped — always honoring the Dependency Rule.
 
 ## Operating Procedure
-1. Load `layer-boundaries`, `component-principles`, and `solid-principles`.
+1. Load `ca-layer-boundaries`, `ca-component-principles`, and `ca-solid-principles`.
 2. **Place** each entity, interactor, request/response model, controller,
    presenter, and gateway into one of the four layers.
 3. **Define ports**: for each use case, the input boundary, output boundary, and
@@ -65,7 +65,7 @@ how components are grouped — always honoring the Dependency Rule.
 
     **This is the Dependency Rule one level up.** A presentation task blocking on a
     server implementation is the outer layer reaching for a concretion instead of
-    the abstraction — exactly what `dependency-rule` forbids in code. The plan graph
+    the abstraction — exactly what `ca-dependency-rule` forbids in code. The plan graph
     obeys the same law.
 
     Run 3 is the cost: `T8 frontend` declared `depends_on: ["T6"]` (the route

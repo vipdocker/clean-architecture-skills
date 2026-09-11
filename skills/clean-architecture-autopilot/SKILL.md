@@ -1,8 +1,8 @@
 ---
 name: clean-architecture-autopilot
-description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use process-tuning), or for reviewing code without building it (use architecture-review-checklist).
+description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.8.0 -->
+<!-- clean-architecture system v1.10.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -36,8 +36,8 @@ is at `scripts/cc_log.py` there. Use that absolute path if `$0` is unavailable.)
 Then, at **every** phase enter/exit and **every** gate verdict, call:
 ```bash
 python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
-  --phase P2 --event phase_enter --agent architecture-designer \
-  --skills layer-boundaries,component-principles --status in_progress
+  --phase P2 --event phase_enter --agent ca-architecture-designer \
+  --skills ca-layer-boundaries,ca-component-principles --status in_progress
 python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
   --phase G3 --event gate_verdict --verdict APPROVED --status in_progress
 ```
@@ -197,7 +197,7 @@ never stall a phase. When one named below cannot be invoked:
      --phase P4 --event superpower_unavailable \
      --detail '{"name":"test-driven-development","fallback":"applied"}'
    ```
-   `process-tuning` reads these events to score augmentation ROI and to decide
+   `ca-process-tuning` reads these events to score augmentation ROI and to decide
    which references to keep, promote, or drop.
 3. Never weaken a gate, skip a phase, or bend the Dependency Rule to compensate.
 
@@ -212,15 +212,15 @@ production runs, which emitted zero of them:
    work — could only be attributed to batch windows, and "which component is
    expensive" was unanswerable.
 2. **ROI.** `--agent`, `--skills` and `--superpowers` ride on this event.
-   `process-tuning` scores augmentation by separating "fired and visibly helped"
+   `ca-process-tuning` scores augmentation by separating "fired and visibly helped"
    from "fired and changed nothing" from "was never installed"; with only the
    `superpower_unavailable` side recorded it cannot tell the first two apart, and the
    feedback loop the run log exists for goes dark.
 
 ```bash
 python3 .../scripts/cc_log.py event --root "<project_dir>" --slug "<task-slug>" \
-  --phase P4 --event agent_dispatch --agent clean-implementer \
-  --skills dependency-rule,layer-boundaries \
+  --phase P4 --event agent_dispatch --agent ca-clean-implementer \
+  --skills ca-dependency-rule,ca-layer-boundaries \
   --superpowers test-driven-development,using-git-worktrees \
   --detail '{"component":"ordering","worktree":"p4/place-order/ordering"}'
 ```
@@ -247,8 +247,8 @@ bearing ones and they ship in this repo.
   naming conventions). Skip entirely for greenfield.
 
 ### P1 — Requirements → Entities/Use Cases
-- Role agent: `agents/requirements-analyst.md`
-- Local skill: `use-case-extraction`
+- Role agent: `agents/ca-requirements-analyst.md`
+- Local skill: `ca-use-case-extraction`
 - Superpowers skill: **`brainstorming`** (mandatory — explore intent/requirements
   before modeling), **`feature-spec`** (turn fuzzy asks into scoped requirements /
   handle scope & change requests).
@@ -256,8 +256,8 @@ bearing ones and they ship in this repo.
 - Exit artifact: `{entities, use_cases, deferred_details, open_questions}`.
 
 ### P2 — Layered Design
-- Role agent: `agents/architecture-designer.md`
-- Local skills: `layer-boundaries`, `component-principles`, `solid-principles`
+- Role agent: `agents/ca-architecture-designer.md`
+- Local skills: `ca-layer-boundaries`, `ca-component-principles`, `ca-solid-principles`
 - Superpowers skill: **`writing-plans`** (structure the design as an executable
   plan with DAG tasks), **`plan-eng-review`** (eng-manager-mode review of the
   architecture/data-flow/edge-cases before it is locked).
@@ -286,7 +286,7 @@ bearing ones and they ship in this repo.
   ```
   A presentation task (templates/static/UI only) that blocks on a server
   implementation is the outer layer reaching for a concretion instead of the
-  abstraction — the same violation `dependency-rule` forbids in code, one level up.
+  abstraction — the same violation `ca-dependency-rule` forbids in code, one level up.
   `cc_log.py` refuses `phase_exit P2` on an unwaived finding.
 
   Run 3's cost: `T8 frontend` declared `depends_on: ["T6"]` (the route
@@ -326,8 +326,8 @@ bearing ones and they ship in this repo.
   if the plan itself defers tests to the end.
 
 ### G3 — Dependency Rule Audit (GATE)
-- Role agent: `agents/dependency-auditor.md`
-- Local skills: `dependency-rule`, `component-principles`
+- Role agent: `agents/ca-dependency-auditor.md`
+- Local skills: `ca-dependency-rule`, `ca-component-principles`
 - Bundled tool (EXECUTABLE): `scripts/dep_graph.py` — AST import graph + Tarjan
   SCC scan. Runs 1 and 2 each rewrote this from scratch (~500 lines per run);
   use the bundled one and spend the effort judging the graph instead:
@@ -347,8 +347,8 @@ bearing ones and they ship in this repo.
 - Verdict: `APPROVED` → P4; `REVISE_REQUIRED` → P2 (increment `gate3_iterations`).
 
 ### P4 — Implementation (inside-out, per component)
-- Role agent: `agents/clean-implementer.md`
-- Local skills: `dependency-rule`, `solid-principles`, `layer-boundaries`
+- Role agent: `agents/ca-clean-implementer.md`
+- Local skills: `ca-dependency-rule`, `ca-solid-principles`, `ca-layer-boundaries`
 - Superpowers skill: **`test-driven-development`** (drives **batched Red-Green**
   TDD — write tests for a cohesion group, confirm batch RED, implement, confirm
   batch GREEN; inner-layer tests need no DB/UI, proving isolation),
@@ -396,8 +396,8 @@ bearing ones and they ship in this repo.
 - Exit artifact: `{files, tests, status, concerns, debts}` per component.
 
 ### G5 — Architecture Review (GATE)
-- Role agent: `agents/architecture-reviewer.md`
-- Local skill: `architecture-review-checklist` (+ the three deep-dive skills)
+- Role agent: `agents/ca-architecture-reviewer.md`
+- Local skill: `ca-architecture-review-checklist` (+ the three deep-dive skills)
 - Superpowers skill: **`requesting-code-review`** (frame the review),
   **`ast-code-analysis-superpower`** (re-run structural scans on the actual code),
   **`codex`** (adversarial "try to break it" pass on business rules),
@@ -435,7 +435,21 @@ bearing ones and they ship in this repo.
 - Superpowers skill: **`receiving-code-review`** (process any human feedback with
   rigor, not blind agreement), **`finishing-a-development-branch`** (merge/PR/cleanup
   decision), optionally **`ship`** if the user wants deploy.
-- Exit: accepted, integrated work + a summary of `debts`/follow-ups.
+- **Processing report (MECHANICAL, required):** before `phase_exit P6`, generate
+  `.cc-skill/<slug>/report.md`:
+  ```bash
+  python3 .../scripts/cc_log.py report --root "<project_dir>" --slug "<task-slug>"
+  ```
+  It assembles the closing record from the logs — never hand-written: wall clock,
+  per-phase and per-component durations (recorded vs raw, with ⚠ on divergence),
+  P4 parallelism ratio, user wait per pause, idle pauses, gate verdicts and
+  iterations, signed-off debts, question ledger, and the git change list diffed
+  against the baseline commit `init` recorded in the manifest.
+  `cc_log.py` refuses `phase_exit P6` without it. Runs 3–5 each finished with a
+  different hand-assembled artifact (or none); optional closing steps drift, so
+  this one is gated like every other artifact.
+- Exit: accepted, integrated work + `summary.md` (prose) + `report.md`
+  (mechanical) + a summary of `debts`/follow-ups.
 
 ---
 
@@ -449,14 +463,14 @@ methodology skills — not the full text of every skill in the system.
 
 | Current layer being implemented | Inject (full text) | Inject (rules summary only) |
 |---|---|---|
-| Entities | `dependency-rule` | TDD rules summary (below) |
-| Use Cases | `dependency-rule` | TDD rules summary (below) |
-| Interface Adapters | `dependency-rule`, `layer-boundaries` | TDD rules summary (below) |
-| Frameworks & Main | `layer-boundaries` | TDD rules summary (below) |
+| Entities | `ca-dependency-rule` | TDD rules summary (below) |
+| Use Cases | `ca-dependency-rule` | TDD rules summary (below) |
+| Interface Adapters | `ca-dependency-rule`, `ca-layer-boundaries` | TDD rules summary (below) |
+| Frameworks & Main | `ca-layer-boundaries` | TDD rules summary (below) |
 
-- `solid-principles` is injected in full only when the component has >3 classes
+- `ca-solid-principles` is injected in full only when the component has >3 classes
   in the layer; otherwise its intent is covered by the TDD rules summary.
-- `component-principles` is NOT injected at P4 (it is a design-time skill for
+- `ca-component-principles` is NOT injected at P4 (it is a design-time skill for
   P2/G3); referencing it during implementation adds ~200 tokens for zero value.
 
 ### TDD Rules Summary (inline injection source)
@@ -631,7 +645,7 @@ auxiliary, not main-flow parallelism.
   component to `systematic-debugging`; if it can't clear, roll it back (discard the
   worktree, keep the branch for inspection) and surface it at G5 as a mandatory
   follow-up — never merge a red component to make the group "look done".
-- A `parallel_group_id` ties sibling tasks together so `process-tuning` can later
+- A `parallel_group_id` ties sibling tasks together so `ca-process-tuning` can later
   measure fan-out width vs. wall-clock savings.
 
 ### Determinism note
@@ -672,6 +686,8 @@ never be overwritten.
       p4-<component>.json            # one per implemented component
       g5-review.json                 # gate verdict + findings
     summary.md                       # human-readable recap generated at DONE
+    report.md                        # mechanical ledger (cc_log.py report) —
+                                     #   REQUIRED before phase_exit P6
 ```
 Naming rules for `<task-slug>`:
 - Derive from the task's brief description: lowercase, hyphen-separated, ASCII where
@@ -745,6 +761,15 @@ artifacts — a run that asked a lot has an upstream information gap, one that a
 nothing while shipping surprises had the opposite problem);
 per-phase wall-clock; and a short "what to tune next time" note (e.g. a gate that
 looped repeatedly signals an ambiguous boundary upstream).
+
+### report.md (generated at DONE — the mechanical ledger, REQUIRED)
+`cc_log.py report` produces it from run.jsonl + state.json + git. Where
+`summary.md` narrates, `report.md` counts: wall clock, user wait, idle, P4
+parallelism, per-phase and per-component durations (recorded pause-corrected
+value AND raw timestamp span, ⚠-flagging divergence), gate verdicts, signed-off
+debts, question ledger, and the git change list diffed against the baseline
+commit recorded at `init`. Regenerate any time — it is idempotent and never
+hand-written. `phase_exit P6` is refused without it.
 
 ### How to use it for review & tuning
 - **核对 (audit)**: replay `.cc-skill/<task-slug>/run.jsonl` to see exactly which

@@ -1,8 +1,8 @@
 ---
-name: dependency-auditor
-version: 1.8.0
+name: ca-dependency-auditor
+version: 1.10.0
 description: Phase 3 gate agent. Verifies the design (and later the code) obeys the Dependency Rule and the acyclic-dependencies principle before implementation begins. Returns APPROVED or REVISE_REQUIRED with precise violations. This is a fast, focused gate — not a full review.
-skills: [dependency-rule, component-principles]
+skills: [ca-dependency-rule, ca-component-principles]
 phase: 3
 inputs: layer_map, ports[], component_map, directory_tree
 outputs: verdict (APPROVED | REVISE_REQUIRED), violations[]
@@ -16,7 +16,7 @@ source-code dependencies point only inward and that the component graph has no
 cycles. If they don't, you send the design back with exact fixes.
 
 ## Operating Procedure
-1. Load `dependency-rule` and `component-principles`.
+1. Load `ca-dependency-rule` and `ca-component-principles`.
 2. Build the layer adjacency from `layer_map`. For every declared reference/import,
    confirm it targets the same or an inner layer.
 3. Check that every use-case → external interaction goes through an inner-owned
