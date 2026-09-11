@@ -66,11 +66,24 @@ right station. The design mirrors a harness pattern: **plan → gate → build �
 ## When to Enter the User Loop
 
 The orchestrator pauses and asks the user when:
-1. Phase 1 produces `open_questions` about a business rule / actor.
-2. A specific technology must be chosen (DB/framework/UI) that the design has so
-   far kept behind a port.
-3. Gate 3 exceeds its iteration cap.
-4. Gate 5 wants to accept a MAJOR as debt.
+1. `business_rule` — Phase 1 produces `open_questions` about a business rule / actor.
+2. `tech_choice` — a specific technology must be chosen (DB/framework/UI) that the
+   design has so far kept behind a port.
+3. `gate_overflow` — Gate 3 or Gate 5 exceeds its iteration cap.
+4. `debt_signoff` — Gate 5 wants to accept a MAJOR as debt.
+
+Triggers 1–2 are **information gaps**: the answer may already sit in the P0
+`codebase_notes`, the design source, or the P2 artifact, so the orchestrator looks
+there first and records what it checked. Questions answered that way are adopted,
+not asked. Triggers 3–4 are **authority decisions** — only the user can make them.
+A debt sign-off is bound to the current verdict's exact debt question by event
+sequence and debt list; the logger proves that provenance, not the speaker's identity.
+
+Pauses are **batched**: one user loop per phase boundary carrying up to 4 questions
+(one `AskUserQuestion` call), not one pause per decision. Questions whose options
+depend on an earlier answer are the one case that splits into a second round. Both
+disciplines are mechanically enforced by `cc_log.py`; the full contract lives in the
+USER LOOP section of `skills/clean-architecture-autopilot/SKILL.md`.
 
 ## Parallelization
 
