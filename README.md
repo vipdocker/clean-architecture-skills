@@ -4,7 +4,7 @@
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
-> 本目录中的所有文件都是**定义 + 文档**，不做真实安装。你可以直接阅读，或把 `skills/` 与 `agents/` 拷贝到你自己的 agent 运行环境里使用。
+> 本目录中的所有文件都是**定义 + 文档**，同时提供安装脚本：`bash install.sh` 一键把 8 个 Skill 与 5 个 Agent 部署到本机 agent 运行环境（详见「方式 C」），`bash uninstall.sh` 一键移除。
 
 ---
 
@@ -21,6 +21,8 @@
 ```
 clean-code/
 ├── README.md                                  ← 你在这里
+├── install.sh                                 一键安装（skills + agents → 本机）
+├── uninstall.sh                               一键反安装（只清本项目的文件）
 ├── skills/                                     方法论（Agent 调用的知识）
 │   ├── clean-architecture-autopilot/SKILL.md   ★ 总控编排器：状态机+dispatch+质量门+增强映射
 │   ├── use-case-extraction/SKILL.md            从需求提炼 实体 / 用例
@@ -163,8 +165,28 @@ clean-code/
 4. **阶段 4**：`APPROVED` 后，用 `agents/clean-implementer.md` **由内向外**逐层实现，每层做导入方向自校验 + 单元测试。组件图无环，所以独立组件可并行实现。
 5. **阶段 5（门）**：用 `agents/architecture-reviewer.md` 跑完整清单。BLOCKER 必须清零；MAJOR 只能在你签字后作为技术债接受。
 
-### 方式 C：迁移到真实 Skill 运行环境
-把 `skills/` 下每个目录（含 `SKILL.md`）拷到你的 agent skill 目录，把 `agents/` 映射为子 agent 定义，再按 `pipeline/orchestration.md` 的 DAG 编排即可。当前所有 SKILL.md 的 frontmatter 严格只含 `name` / `description` 两个字段（符合 Anthropic Skill 编写规范），版本号以注释形式记在正文首行而不占 frontmatter；每个 `description` 均含正向触发词与负向排除（`Not for …`），用于拉开相邻 skill 之间的触发边界。
+### 方式 C：一键安装到本机 Skill 运行环境（Qoder / qoderwork 用户推荐）
+在仓库根目录执行：
+
+```bash
+bash install.sh      # 安装 / 更新到最新
+bash uninstall.sh    # 反安装（只移除本项目的文件，不动其他 skill/agent）
+```
+
+安装布局：
+
+| 内容 | 位置 | 形式 |
+|---|---|---|
+| 8 个 Skill | `~/.agents/skills/<name>` | 真实拷贝（唯一事实源，Qoder 读这里） |
+| 8 个 Skill | `~/.qoderwork/skills/<name>` | 软链 → `~/.agents/skills/<name>`（qoderwork 读这里） |
+| 5 个 Agent | `~/.qoder/agents/clean-architecture-autopilot/` | 真实拷贝（包式子目录） |
+| 5 个 Agent | `~/.qoderwork/agents/clean-architecture-autopilot/` | 真实拷贝（包式子目录） |
+
+**Skill 不装 `~/.qoder/skills`**：Qoder 同时读 `~/.qoder/skills` 与 `~/.agents/skills`，两处都装会让 skill 列表重复；旧版脚本装到那里的残留会被 install.sh 顺带清除（应用侧迁移已把它们改名留在 `~/.qoder/skills-bk`，脚本不动那个备份）。**Agent 不平铺在 agents 根目录**：统一放按项目命名的子目录 `clean-architecture-autopilot/`（Qoder 2026-09 起的包式布局，平铺 .md 会被应用搬进子目录；qoderwork 侧同样采用），旧平铺残留由 install.sh 清除。
+
+`install.sh` 自带三道预检：每个 skill 必有 `SKILL.md`、总控的 4 个机械脚本（`cc_log.py` 等）必须在场、**全仓版本号必须一致**（skill 首行注释与 agent frontmatter 对齐，不一致拒绝安装——防止把漂移版本部署出去）。同步用 `rsync --delete`，仓库里删掉的文件安装时也会删掉，`__pycache__`/`.DS_Store` 不安装；重复执行幂等。**仓库每次更新后重跑一次 `bash install.sh`** 即可保持各位置一致（历史上 run4 就因安装副本停在 v1.3.0 而踩坑）。
+
+若要迁移到其它 agent 运行环境：把 `skills/` 下每个目录（含 `SKILL.md`）拷到你的 agent skill 目录，把 `agents/` 映射为子 agent 定义，再按 `pipeline/orchestration.md` 的 DAG 编排即可。当前所有 SKILL.md 的 frontmatter 严格只含 `name` / `description` 两个字段（符合 Anthropic Skill 编写规范），版本号以注释形式记在正文首行而不占 frontmatter；每个 `description` 均含正向触发词与负向排除（`Not for …`），用于拉开相邻 skill 之间的触发边界。
 
 ---
 
