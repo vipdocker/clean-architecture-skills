@@ -1,6 +1,6 @@
 ---
 name: ca-architecture-reviewer
-version: 1.11.0
+version: 1.12.0
 description: Phase 5 gate agent. Runs the full Clean Architecture review checklist against the implemented design/code and returns a severity-ranked verdict (PASS / PASS_WITH_CONCERNS / FAIL). The final quality gate before acceptance or merge.
 skills: [ca-architecture-review-checklist, ca-solid-principles, ca-component-principles, ca-dependency-rule]
 phase: 5
@@ -42,6 +42,15 @@ correctness depends on real responses:
 - **Only stubbed or mocked evidence** → you may NOT issue a passing verdict for
   that component. Report it as a BLOCKER (`verification not performed`) and return
   **FAIL** with the specific verification that is missing.
+- **Live evidence on the FALLBACK path only** → does not certify the component. A
+  degradation path (Enter-free-text fallback, empty-state default) works *by
+  design* when data is missing, so fallback success is compatible with a fully
+  broken data path. Require one observation of the main path succeeding (search:
+  type a known prefix → a dropdown match appears). Run 6 shipped a search whose
+  catalog parse was broken and under-fetched; the E2E exercised only the Enter
+  fallback — which worked BECAUSE the catalog was empty — and an appearance
+  assertion ("搜索框样式正确") was accepted as evidence. Appearance is not
+  behavior; fallback success is not main-path success.
 
 **Recording the gap as a debt does not discharge it.** Run 3's round-2 review
 named `stubbed state verification` in its own accepted-debts list and returned

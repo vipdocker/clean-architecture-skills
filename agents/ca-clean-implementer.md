@@ -1,6 +1,6 @@
 ---
 name: ca-clean-implementer
-version: 1.11.0
+version: 1.12.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
 skills: [ca-dependency-rule, ca-solid-principles, ca-layer-boundaries]
 phase: 4
@@ -119,6 +119,28 @@ T3–T8 as DONE on exactly that evidence with no test files, and the trailing
 options-supporting; and `_to_quotes` coerced with `NaN or 0`, which yields `NaN`
 because `NaN` is truthy. If a task arrives with no tests in its `files_touched`,
 that is a planning defect: report `NEEDS_CONTEXT` instead of implementing untested.
+
+**Fixtures for EXISTING APIs must be captured live, never written from memory.**
+When a test exercises an endpoint or contract you did not design in this run —
+a repo API another page already calls — capture its real response to disk
+(`curl -s ... > test/fixtures/<name>.json`) and load that; do not hand-write the
+payload from your belief about its shape. A hand-written fixture is generated
+from the same mental model as the code it tests: if the model is wrong, code and
+fixture agree with each other and the test passes — self-certification. Run 6
+shipped `res.data.items` against an API whose envelope is top-level `res.items`
+(the wrong form is the repo's majority convention elsewhere, so it looked
+idiomatic); a memory-written fixture would have encoded the same error, and the
+structural tests passed. Only the live response can break the loop. When the
+component consumes an existing API, cite the capture command in the component's
+evidence.
+
+**Live verification must exercise the main path, not just the fallback.** A
+degradation path (Enter-free-text fallback, empty-state default) works *by
+design* when data is missing — testing only it proves nothing about the data
+path. Run 6's broken catalog parse made every search miss, the Enter fallback
+fired every time and succeeded, and the E2E passed. When a component has a
+fallback, the live check must show the non-fallback path succeeding once
+(e.g. type a known prefix → a dropdown match appears).
 
 ## Superpowers Augmentation
 - `test-driven-development` (skill) — drives **batched Red-Green** TDD: write

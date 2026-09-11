@@ -2,7 +2,7 @@
 name: ca-architecture-review-checklist
 description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use ca-layer-boundaries), for the cheaper pre-code dependency-direction audit (use ca-dependency-rule), or for judging whether the PROCESS itself needs tuning (use ca-process-tuning).
 ---
-<!-- clean-architecture system v1.11.0 -->
+<!-- clean-architecture system v1.12.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 
@@ -98,6 +98,19 @@ follow-up review.
       behavior (endpoint, UI, background job) has evidence from a real execution,
       not only from stubs. Stubs prove the wiring; only a real run proves the
       behavior.
+- [ ] **Live evidence covers the MAIN path, not the fallback**: a component with a
+      degradation path (search-with-free-text-Enter fallback, empty-state default,
+      retry-to-cache) must show live evidence of the happy path SUCCEEDING — e.g.
+      for a search widget: type a known prefix, assert the dropdown shows ≥1
+      match. The fallback by definition works when data is missing, so a
+      fallback-only test passes with an empty dataset and proves nothing about
+      the data path. Run 6 shipped a search whose catalog parse was broken
+      (`res.data.items` vs top-level `res.items` — the wrong envelope is the
+      repo's majority convention, so it looked idiomatic) AND under-fetched
+      (500 of 2257); the E2E exercised only the Enter fallback, which worked
+      *because* the catalog was empty, and the reviewer accepted "搜索框样式
+      正确" — an appearance assertion. Fallback success is not evidence of the
+      main path; appearance assertions are not evidence of behavior.
 
 ## Scoring & Verdict
 
