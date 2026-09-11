@@ -2,7 +2,7 @@
 name: ca-architecture-review-checklist
 description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use ca-layer-boundaries), for the cheaper pre-code dependency-direction audit (use ca-dependency-rule), or for judging whether the PROCESS itself needs tuning (use ca-process-tuning).
 ---
-<!-- clean-architecture system v1.10.0 -->
+<!-- clean-architecture system v1.11.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 

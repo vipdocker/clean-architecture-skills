@@ -785,6 +785,33 @@ def cmd_event(a):
             violations.append({
                 "rule": "P6 exit requires a generated report.md",
                 "actual": f"no report.md in {run_dir}"})
+        # Git closure: an uncommitted tree poisons the NEXT run's baseline.
+        # Run 5 (etf) closed with "git 收尾" written in its exit detail but
+        # never committed; run 6's report then diffed against a stale baseline
+        # and listed 19 of run 5's files as its own. A run that finishes must
+        # leave a tree whose diff-to-baseline is exactly its own work.
+        elif detail.get("commit") != "deferred":
+            dirty = _git_out(a.root, "status", "--porcelain") or ""
+            dirty = [l for l in dirty.splitlines()
+                     if l and not l[3:].startswith(".cc-skill")]
+            if dirty:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log phase_exit P6: {len(dirty)} "
+                        f"uncommitted change(s) remain (excluding .cc-skill/). "
+                        f"Commit this run's work before closing, so the next "
+                        f"run's report baseline contains only its own work. "
+                        f"Run 5 closed without committing and run 6's change "
+                        f"list inherited 19 of its files. If deferring the "
+                        f"commit is a deliberate choice, re-run with "
+                        f"--detail '{{\"commit\":\"deferred\","
+                        f"\"reason\":\"...\"}}'. If the bypass is intentional, "
+                        f"re-run with --force.")
+                violations.append({
+                    "rule": "P6 exit requires a committed tree (or an "
+                            "explicit deferral)",
+                    "actual": f"{len(dirty)} uncommitted path(s), e.g. "
+                              f"{dirty[:3]}"})
 
     # --- PASS_WITH_CONCERNS must name its concerns ------------------------
     # The verdict means "passing, but with debts the user must accept". A PWC that
@@ -803,6 +830,45 @@ def cmd_event(a):
             violations.append({
                 "rule": "PASS_WITH_CONCERNS must name the debts it accepts",
                 "actual": "no debts_awaiting_signoff in --detail"})
+
+    # --- G5 verdict requires its artifact on disk --------------------------
+    # The review's findings have lived only inside gate_verdict event details
+    # for two consecutive runs (5 and 6) despite the contract naming
+    # artifacts/g5-review.json as their machine-readable home — the delta
+    # review's scope routing and the process-tuning audit both read the
+    # artifact, not the event stream. Prose didn't hold; this is the same
+    # lesson as every other latch.
+    if a.event == "gate_verdict" and a.phase == "G5":
+        g5_path = os.path.join(run_dir, "artifacts", "g5-review.json")
+        err = None
+        if not os.path.exists(g5_path):
+            err = "missing"
+        else:
+            try:
+                with open(g5_path, encoding="utf-8") as f:
+                    art = json.load(f)
+                if not isinstance(art.get("findings"), list):
+                    err = "no findings[] array"
+                elif not art.get("verdict"):
+                    err = "no verdict key"
+            except (OSError, json.JSONDecodeError) as e:
+                err = f"unreadable ({e})"
+        if err:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log gate_verdict G5: {g5_path} {err}. "
+                    f"The review's findings must live in the artifact — "
+                    f"findings carry the scope field the delta review routes "
+                    f"on, and process-tuning audits the artifact, not the "
+                    f"event stream. Runs 5 and 6 both skipped writing it. "
+                    f"Write it (verdict + findings[] + review_mode + "
+                    f"mandatory_followups, per the checklist contract) and "
+                    f"re-run. If the bypass is intentional, re-run with "
+                    f"--force.")
+            violations.append({
+                "rule": "G5 verdict requires artifacts/g5-review.json "
+                        "(verdict + findings[])",
+                "actual": f"{g5_path}: {err}"})
 
     # --- P2 may not exit with constraints the artifact never carried -------
     # Run 3's design source had "## 8. 前端约束" requiring `StockSearchWidget`;
@@ -1497,6 +1563,39 @@ def cmd_report(a):
     p4_raw = phase_raw.get("P4")
     parallel = (comp_raw_sum / p4_raw) if (p4_raw and comp_raw_sum) else None
 
+    # Planned waves (from the P4 enter detail) vs actual overlap (from
+    # dispatch/done timestamp spans): a ratio of exactly 1.00x with a planned
+    # multi-component wave means parallelism was available but not taken —
+    # run 6 planned [[U1,U4],...] yet executed strictly serially, and a bare
+    # 1.00x could not distinguish "could not parallelize" from "did not".
+    p4_enter_detail = {}
+    for e in events:
+        if (e.get("phase") == "P4" and e.get("event") == "phase_enter"
+                and isinstance(e.get("detail"), dict)):
+            p4_enter_detail = e["detail"]
+    waves = p4_enter_detail.get("waves")
+    planned_wave = None
+    if isinstance(waves, list) and waves:
+        planned_wave = max(len(w) if isinstance(w, list) else 1 for w in waves)
+    spans = []
+    for name, r in comp.items():
+        if r.get("raw") is not None:
+            d = dispatch_ts.get(name)
+            if d:
+                t = _parse_ts(d)
+                spans.append((t, t + datetime.timedelta(milliseconds=r["raw"]),
+                              name))
+    actual_overlap = 0
+    for i, (s1, e1, _) in enumerate(spans):
+        for s2, e2, _ in spans[i + 1:]:
+            if s1 < e2 and s2 < e1:
+                actual_overlap += 1
+    overlap_note = None
+    if planned_wave and planned_wave > 1 and actual_overlap == 0 and parallel \
+            and parallel < 1.05:
+        overlap_note = ("计划含多组件 wave 但零重叠 —— 可并行而未并行"
+                        "（对照 wave 计划与串行执行原因）")
+
     def _flag(rec, raw):
         if rec is None or raw is None:
             return ""
@@ -1558,7 +1657,13 @@ def cmd_report(a):
     if inflight_gaps:
         L.append(f"| 在制静默（pause·未计空闲，见 F1 修复说明） | {inflight_gaps} 段 |")
     if parallel:
-        L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x |")
+        wave_desc = (f"（计划最大 wave {planned_wave} 组件 / 实际重叠 "
+                     f"{actual_overlap} 对）"
+                     if planned_wave is not None else "")
+        L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x "
+                 f"{wave_desc} |")
+    if overlap_note:
+        L.append(f"| ⚠ 并行机会 | {overlap_note} |")
     L.append("")
     L.append("### 各阶段耗时")
     L.append("")
