@@ -11,7 +11,7 @@ Usage:
 
   # 2) append one event to run.jsonl AND refresh state.json in one atomic step
   python3 cc_log.py event --root <project_dir> --slug <task-slug> \
-      --phase P2 --event phase_enter [--agent architecture-designer] \
+      --phase P2 --event phase_enter [--agent ca-architecture-designer] \
       [--skills a,b] [--superpowers c,d] [--verdict APPROVED] \
       [--status in_progress] [--detail '{"k":"v"}'] [--duration-ms 1234] \
       [--scope 'component:layer,...']
@@ -281,6 +281,9 @@ def _scan_log(run_dir):
     - enter_ts / pause_ms_since_enter: per-phase, for pause-corrected durations.
     - dispatch_ts / pause_ms_since_dispatch: the same per component, so a
       component_done can be timed from its agent_dispatch.
+    - open_components: dispatched but not yet done — a gap with work in flight
+      is silence, not idleness (run 5's T4 did 37.8 min of silent work and the
+      pause heuristic charged it to idle, recording duration 0).
     - user_loop_triggers: which USER LOOP triggers have already been recorded.
     - latest_debt_user_loop_seq / latest_g5_pwc_seq: the exact authority chain for
       a debt sign-off. Existence alone was too weak: an old debt question could be
@@ -290,6 +293,7 @@ def _scan_log(run_dir):
     facts = {"enters": {}, "exits": {}, "last_ts": None,
              "enter_ts": {}, "pause_ms_since_enter": {},
              "dispatch_ts": {}, "pause_ms_since_dispatch": {},
+             "open_components": set(),
              "user_loop_triggers": set(),
              "latest_debt_user_loop_seq": None,
              "latest_g5_pwc_seq": None}
@@ -318,6 +322,10 @@ def _scan_log(run_dir):
                 if comp:
                     facts["dispatch_ts"][comp] = r.get("ts")
                     facts["pause_ms_since_dispatch"][comp] = 0
+                    facts["open_components"].add(comp)
+            elif ev == "component_done":
+                comp = det.get("component") or det.get("task")
+                facts["open_components"].discard(comp)
             elif ev == "user_loop":
                 trig = det.get("trigger")
                 if trig:
@@ -329,17 +337,22 @@ def _scan_log(run_dir):
                 facts["latest_g5_pwc_seq"] = r.get("seq")
             elif ev == "pause":
                 gap = det.get("gap_ms") or 0
-                for k in facts["pause_ms_since_enter"]:
-                    facts["pause_ms_since_enter"][k] += gap
-                for k in facts["pause_ms_since_dispatch"]:
-                    facts["pause_ms_since_dispatch"][k] += gap
+                # Match the writer: only idle-credited pauses subtract. Older
+                # logs predate the flag and default to idle. Without this check
+                # the replayed ledger re-charges an in-flight gap to the very
+                # component it was exempting.
+                if det.get("credited_to_idle", True):
+                    for k in facts["pause_ms_since_enter"]:
+                        facts["pause_ms_since_enter"][k] += gap
+                    for k in facts["pause_ms_since_dispatch"]:
+                        facts["pause_ms_since_dispatch"][k] += gap
     return facts
 
 
 def _elapsed_ms_since_enter(facts, phase):
     """Wall-clock since this phase's latest phase_enter, minus annotated pauses,
     used to auto-fill duration_ms on phase_exit. Both early runs left duration_ms
-    empty, so process-tuning's cost section had nothing to work with; run 3 then
+    empty, so ca-process-tuning's cost section had nothing to work with; run 3 then
     showed the opposite failure — a 6h18m unlogged gap inflated P6 to 398 minutes.
     Returns None when no matching enter exists (degraded logs)."""
     then = _parse_ts(facts["enter_ts"].get(phase))
@@ -756,8 +769,14 @@ def cmd_event(a):
     # the full source — a MAJOR finding and a 29-minute corrective P4 round for a
     # gap a set difference finds instantly.
     if a.event == "phase_exit" and a.phase == "P2":
-        art = detail.get("artifact") or \
-            (st.get("artifact_pointers") or {}).get("p2")
+        # Resolve the P2 artifact robustly. Run 5 slipped through with a
+        # self-reported "PASS 10/10" that the latch never produced: P2 never
+        # logged artifact_written, the exit detail used the plan_artifact key
+        # rather than artifact, and the conventional path was never tried.
+        art = (detail.get("artifact")
+               or (st.get("artifact_pointers") or {}).get("p2")
+               or detail.get("plan_artifact")
+               or "artifacts/p2-design.json")
         src = detail.get("design_source")
         if not src:
             if not a.force:
@@ -796,8 +815,14 @@ def cmd_event(a):
                 violations.append({
                     "rule": "P2 artifact must cover every design source section",
                     "actual": summary})
-            detail.setdefault("design_coverage",
-                              cov["verdict"] if cov else "unchecked")
+            # Overwrite, never setdefault: run 5's orchestrator self-reported a
+            # PASS here that the latch never produced, and setdefault preserved
+            # it. The value in the event must be the latch's own verdict; a
+            # caller wanting to pre-state one has --detail to lose.
+            detail["design_coverage"] = (
+                cov["verdict"] if cov else "unchecked")
+            if cov is None:
+                detail["design_coverage_source"] = "self_report_overridden"
 
         # The plan graph is checked whether or not an external design source
         # exists — the DAG is in the artifact either way. Run 3's frontend sat at
@@ -926,7 +951,7 @@ def cmd_event(a):
     # production runs, which emitted zero agent_dispatch events. First, cost: P4 was
     # 79% of run 3's effective work and could only be attributed to batch windows,
     # never to a single component. Second, ROI: `agent`, `skills` and `superpowers`
-    # ride on the dispatch event, so without it process-tuning cannot tell
+    # ride on the dispatch event, so without it ca-process-tuning cannot tell
     # "fired and changed nothing" from "was never installed".
     if a.event == "component_done":
         comp = detail.get("component") or detail.get("task")
@@ -950,8 +975,8 @@ def cmd_event(a):
                     f"when the work begins:\n"
                     f"  cc_log.py event --root <dir> --slug <slug> --phase "
                     f"{a.phase} --event agent_dispatch \\\n"
-                    f"    --agent clean-implementer --skills dependency-rule,"
-                    f"layer-boundaries \\\n"
+                    f"    --agent ca-clean-implementer --skills ca-dependency-rule,"
+                    f"ca-layer-boundaries \\\n"
                     f"    --superpowers test-driven-development \\\n"
                     f"    --detail '{{\"component\":\"{comp}\"}}'\n"
                     f"That one event also carries the agent/skills/superpowers "
@@ -1136,15 +1161,31 @@ def cmd_event(a):
         gap_ms = int((datetime.datetime.now().astimezone()
                       - gap_from).total_seconds() * 1000)
         if gap_ms >= PAUSE_GAP_MS:
+            # A silent gap only means "nobody logged", not "nobody worked": run
+            # 5's T4 executed silently for 37.8 minutes, the heuristic charged
+            # the whole gap to idle, and its recorded duration came back 0 ms.
+            # With components in flight the pause is recorded for the audit
+            # trail but excluded from every subtraction ledger — that time is
+            # work, not waiting.
+            in_flight = sorted(facts["open_components"])
+            credited = not in_flight
             _append_jsonl(run_dir, _event_rec(
                 st.get("run_id"), seq, a.phase, "pause",
                 {"gap_ms": gap_ms, "since": facts["last_ts"],
-                 "reason": f"no events for {gap_ms // 60000} min; auto-annotated "
-                           f"so phase durations exclude it"}))
-            for k in facts["pause_ms_since_enter"]:
-                facts["pause_ms_since_enter"][k] += gap_ms
-            for k in facts["pause_ms_since_dispatch"]:
-                facts["pause_ms_since_dispatch"][k] += gap_ms
+                 "credited_to_idle": credited,
+                 "components_in_flight": in_flight,
+                 "reason": (f"no events for {gap_ms // 60000} min; auto-"
+                            f"annotated so phase durations exclude it"
+                            if credited else
+                            f"no events for {gap_ms // 60000} min while "
+                            f"{in_flight} were executing — recorded for audit "
+                            f"but NOT counted as idle, so component and phase "
+                            f"durations keep this time")}))
+            if credited:
+                for k in facts["pause_ms_since_enter"]:
+                    facts["pause_ms_since_enter"][k] += gap_ms
+                for k in facts["pause_ms_since_dispatch"]:
+                    facts["pause_ms_since_dispatch"][k] += gap_ms
             seq += 1
 
     # --- gate staleness ---------------------------------------------------
