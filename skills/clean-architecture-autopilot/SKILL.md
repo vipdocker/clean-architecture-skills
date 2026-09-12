@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.13.0 -->
+<!-- clean-architecture system v1.13.1 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -231,18 +231,27 @@ The sum of component durations divided by that phase's wall clock is then the
 overlap was real. That ratio is the only way to confirm a plan change meant to
 parallelize actually did.
 
-**Waves are a dependency-legality statement, not an execution promise (as of
-v1.13).** Runs 6 and 7 both planned multi-component waves and executed strictly
-serially in a single session — the orchestrator here has no multi-session fan-out,
-so a planned wave only certifies that those components *may* run concurrently
-(files pairwise disjoint). Treat it that way: don't invest in worktrees for a
-parallelism that the execution environment won't deliver, and when components
-execute inline in one session, log the dispatch/done pair per component anyway
-(backfilled at completion is acceptable — record `"note":"backfilled, single
-session"` in the dispatch detail) so per-component cost stays measurable. The
-report's planned-vs-actual overlap row remains the honest signal: it tells you
-whether the environment actually parallelized, which is a property of the
-environment, not of the plan.
+**Waves certify dependency legality AND enable parallel execution — the choice
+is the orchestrator's, per run (corrected in v1.13.1).** A planned wave proves
+the components' files are pairwise disjoint, which makes BOTH serial execution
+safe AND concurrent fan-out legal. Run 5 (etf) actually fanned out: four
+components dispatched at one instant, wave parallelism measured 2.35x from
+timestamps — the harness supports concurrent subagent dispatch. Runs 6 and 7
+then chose serial inline execution, and chose reasonably: their components were
+small (1–13 min) and tightly coupled to existing module context, where the
+per-dispatch context injection outweighs the overlap saved. Decide per run:
+
+- **Fan out** (concurrent Agent dispatches in one message, worktree per
+  component when they write the same repo) when components are substantial
+  (≳15 min each) and boundary-clean — the v1.6.0 contract-dependency shape
+  (presentation on `consumes_contract`, backend independent) is exactly this.
+- **Execute inline serially** when components are small or share heavy existing
+  context; still log dispatch/done per component (backfilled at completion is
+  acceptable — record `"note":"backfilled, single session"`) so per-component
+  cost stays measurable.
+
+The report's planned-vs-actual overlap row is the honest signal of which
+choice a run made and whether the parallelism was real.
 
 Only a missing **local** methodology skill blocks a phase — those are the load
 bearing ones and they ship in this repo.
@@ -620,13 +629,14 @@ rest of the flow (P1→P2→G3→G5) is sequential because each gate must clear 
 the next phase. P0 research may fan out read-only exploration agents, but that is
 auxiliary, not main-flow parallelism.
 
-**Current reality (v1.13): single-session serial execution.** Runs 6 and 7 both
-planned multi-component waves and ran them strictly serially in one session — this
-environment has no multi-session fan-out, so treat everything below as the
-contract for when parallel execution IS available (multiple dispatch targets,
-worktree isolation), and as a dependency-legality statement otherwise. The wave
-plan still matters in both worlds: it proves files are pairwise disjoint, which
-is what makes serial execution safe and future fan-out possible.
+**Execution shape is a per-run choice (v1.13.1).** Run 5 fanned out for real
+(four concurrent dispatches, 2.35x measured wave parallelism); runs 6 and 7 ran
+serially inline — small, tightly-coupled components where dispatch overhead
+exceeds the overlap. The contract below applies whenever the orchestrator
+chooses to fan out; a wave plan alone never obligates it. Fan out when
+components are substantial (≳15 min) and boundary-clean; stay serial when they
+are small or share heavy existing context, logging dispatch/done per component
+either way so cost stays measurable.
 
 ### Preconditions (all must hold before any fan-out)
 1. G3 verdict is `APPROVED` (the component graph is a proven DAG — no cycles).

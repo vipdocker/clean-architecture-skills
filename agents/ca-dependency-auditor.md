@@ -1,6 +1,6 @@
 ---
 name: ca-dependency-auditor
-version: 1.13.0
+version: 1.13.1
 description: Phase 3 gate agent. Verifies the design (and later the code) obeys the Dependency Rule and the acyclic-dependencies principle before implementation begins. Returns APPROVED or REVISE_REQUIRED with precise violations. This is a fast, focused gate — not a full review.
 skills: [ca-dependency-rule, ca-component-principles]
 phase: 3

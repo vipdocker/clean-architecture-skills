@@ -1,6 +1,6 @@
 ---
 name: ca-clean-implementer
-version: 1.13.0
+version: 1.13.1
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
 skills: [ca-dependency-rule, ca-solid-principles, ca-layer-boundaries]
 phase: 4

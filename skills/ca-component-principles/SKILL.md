@@ -2,7 +2,7 @@
 name: ca-component-principles
 description: Applies Clean Architecture's component cohesion (REP, CCP, CRP) and coupling (ADP, SDP, SAP) principles to decide what goes into a deployable component, how components depend on each other, and how to keep the dependency graph acyclic and stable. Use when defining modules/packages/build units, drawing the component dependency graph, or diagnosing cyclic/unstable dependencies. Language-agnostic. Not for class-level responsibility or interface design (use ca-solid-principles), for assigning code to the four layers (use ca-layer-boundaries), or for auditing the inward direction of a single import (use ca-dependency-rule).
 ---
-<!-- clean-architecture system v1.13.0 -->
+<!-- clean-architecture system v1.13.1 -->
 
 # Component Principles (Component-Level Design)
 

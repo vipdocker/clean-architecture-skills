@@ -1,6 +1,6 @@
 ---
 name: ca-architecture-reviewer
-version: 1.13.0
+version: 1.13.1
 description: Phase 5 gate agent. Runs the full Clean Architecture review checklist against the implemented design/code and returns a severity-ranked verdict (PASS / PASS_WITH_CONCERNS / FAIL). The final quality gate before acceptance or merge.
 skills: [ca-architecture-review-checklist, ca-solid-principles, ca-component-principles, ca-dependency-rule]
 phase: 5
