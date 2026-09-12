@@ -2,7 +2,7 @@
 name: ca-process-tuning
 description: Analyzes a completed Clean Architecture Autopilot run to decide whether the PROCESS itself needs tuning. Takes a finished project directory (required) plus its .cc-skill/ run logs (optional but strongly preferred) and produces a tuning report — gate effectiveness scores, rework hotspots, superpowers ROI, per-phase cost, and concrete "tune this next" recommendations. Use when the user hands over a done project (and/or its logs) and asks "does the pipeline need tuning / optimizing?". Not for judging whether the produced CODE is good (use ca-architecture-review-checklist), nor for driving a new build (use clean-architecture-autopilot).
 ---
-<!-- clean-architecture system v1.12.0 -->
+<!-- clean-architecture system v1.13.0 -->
 
 # Process Tuning (Pipeline Retrospective & Optimizer)
 

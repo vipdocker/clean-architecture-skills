@@ -838,37 +838,58 @@ def cmd_event(a):
     # review's scope routing and the process-tuning audit both read the
     # artifact, not the event stream. Prose didn't hold; this is the same
     # lesson as every other latch.
+    #
+    # v1.11 checked only that the keys existed, and run 7 delivered exactly to
+    # that floor: 4 findings all with id=None and evidence=None, content
+    # stuffed into invented top-level keys (run/gate/checklist), review_mode
+    # missing. A latch validates what it checks — so this one now checks every
+    # field the downstream consumers actually read: per-finding id, evidence
+    # and scope (the delta review routes on scope), and review_mode.
     if a.event == "gate_verdict" and a.phase == "G5":
         g5_path = os.path.join(run_dir, "artifacts", "g5-review.json")
-        err = None
+        errs = []
         if not os.path.exists(g5_path):
-            err = "missing"
+            errs.append("missing")
         else:
             try:
                 with open(g5_path, encoding="utf-8") as f:
                     art = json.load(f)
-                if not isinstance(art.get("findings"), list):
-                    err = "no findings[] array"
-                elif not art.get("verdict"):
-                    err = "no verdict key"
+                if not isinstance(art.get("findings"), list) or not art["findings"]:
+                    errs.append("no findings[] array")
+                else:
+                    for i, fnd in enumerate(art["findings"]):
+                        if not isinstance(fnd, dict):
+                            errs.append(f"findings[{i}] not an object")
+                            continue
+                        for k in ("id", "evidence", "scope"):
+                            if not fnd.get(k):
+                                errs.append(f"findings[{i}].{k} empty")
+                if not art.get("verdict"):
+                    errs.append("no verdict key")
+                if not art.get("review_mode"):
+                    errs.append("no review_mode (full|delta)")
             except (OSError, json.JSONDecodeError) as e:
-                err = f"unreadable ({e})"
-        if err:
+                errs.append(f"unreadable ({e})")
+        if errs:
             if not a.force:
                 raise CCLogError(
-                    f"refusing to log gate_verdict G5: {g5_path} {err}. "
-                    f"The review's findings must live in the artifact — "
-                    f"findings carry the scope field the delta review routes "
-                    f"on, and process-tuning audits the artifact, not the "
-                    f"event stream. Runs 5 and 6 both skipped writing it. "
-                    f"Write it (verdict + findings[] + review_mode + "
-                    f"mandatory_followups, per the checklist contract) and "
-                    f"re-run. If the bypass is intentional, re-run with "
-                    f"--force.")
+                    f"refusing to log gate_verdict G5: {g5_path} — "
+                    + "; ".join(errs[:6])
+                    + (f" (+{len(errs) - 6} more)" if len(errs) > 6 else "")
+                    + ". The review's findings must live in the artifact in "
+                    f"contract shape: every finding carries id / scope / "
+                    f"evidence (scope is what the delta review routes on), "
+                    f"plus verdict and review_mode. Run 7 delivered exactly "
+                    f"to the old key-existence floor (id=None, evidence=None, "
+                    f"content in invented keys) — a latch validates what it "
+                    f"checks, so this one now checks every field downstream "
+                    f"consumers read. If the bypass is intentional, re-run "
+                    f"with --force.")
             violations.append({
-                "rule": "G5 verdict requires artifacts/g5-review.json "
-                        "(verdict + findings[])",
-                "actual": f"{g5_path}: {err}"})
+                "rule": "G5 verdict requires artifacts/g5-review.json in "
+                        "contract shape (per-finding id/scope/evidence, "
+                        "review_mode)",
+                "actual": "; ".join(errs[:6])})
 
     # --- P2 may not exit with constraints the artifact never carried -------
     # Run 3's design source had "## 8. 前端约束" requiring `StockSearchWidget`;
