@@ -15,11 +15,23 @@ Usage:
       [--skills a,b] [--superpowers c,d] [--verdict APPROVED] \
       [--status in_progress] [--detail '{"k":"v"}'] [--duration-ms 1234] \
       [--scope 'component:layer,...']
+      # agent_dispatch requires --agent (P4 also requires --skills). When you
+      # backfill a dispatch after inline serial execution, declare the real
+      # start so the pair is timed honestly:
+      #   --detail '{"component":"T1","started_at":"2026-09-14T00:13:30+08:00",
+      #              "note":"inline serial, backfilled"}'
 
   # 2b) scoped P4 re-entry (delta review instead of full g5 invalidation)
   python3 cc_log.py event --root <project_dir> --slug <task-slug> \
       --phase P4 --event phase_enter --scope "ordering:adapters,billing:usecases" \
       --status in_progress
+
+  # 2e) abort a false start honestly — NOT three --force'd gate violations
+  #     posing as "undo". Requires a reason; stamps manifest.aborted and
+  #     reaps every open dispatch.
+  python3 cc_log.py event --root <project_dir> --slug <task-slug> \
+      --phase P0 --event run_aborted \
+      --detail '{"reason":"scope error discovered in P0: this pre-item belongs to the DCF M3 run, not its own task"}'
 
   # 2c) one batched USER LOOP pause (<=4 questions == one AskUserQuestion call).
   #     Information-gap triggers must show what was looked up first; questions
@@ -142,6 +154,12 @@ MAX_BATCH_QUESTIONS = 4
 # Gaps are annotated (not refused) and then subtracted from phase durations.
 PAUSE_GAP_MS = 30 * 60 * 1000
 
+# An in-flight pause longer than this is a suspected suspension, not execution:
+# run 11 (phase-a) left C6_frontend dispatched overnight and the 8.9h gap read
+# as component/P4 wall time, burying the 1.19x active parallelism under 1.01x.
+# The report flags such gaps and computes a suspension-adjusted parallelism.
+SUSPEND_MS = 2 * 60 * 60 * 1000
+
 
 def parse_json_arg(raw, flag):
     """Parse a JSON CLI argument, naming the legal shape on failure so the caller
@@ -235,10 +253,19 @@ def cmd_init(a):
     # diffs against it, so the list is this run's work rather than whatever
     # happens to be uncommitted when the report runs.
     baseline = _git_out(a.root, "rev-parse", "HEAD")
+    # Dirt at init is inherited work, not this run's: run 9 started on run 8's
+    # 18 uncommitted files and its report claimed all 26 new files as its own
+    # (one of them was even run 11's design doc). Count it so the report can
+    # warn instead of letting attribution drift silently.
+    dirty_status = _git_out(a.root, "status", "--porcelain") or ""
+    dirty_at_init = [l[3:] for l in dirty_status.splitlines()
+                     if l and not l[3:].startswith(".cc-skill")]
     manifest = {
         "run_id": run_id, "task_title": a.title or slug, "slug": slug,
         "start": now_iso(), "end": None, "resolved_root": os.path.abspath(run_dir),
         "baseline_commit": baseline,
+        "dirty_at_init": len(dirty_at_init),
+        "dirty_at_init_sample": dirty_at_init[:5],
         "config": {"max_parallel": a.max_parallel},
     }
     atomic_write(os.path.join(run_dir, "manifest.json"),
@@ -302,10 +329,22 @@ def _scan_log(run_dir):
     - last_ts: timestamp of the newest event, used to spot an unlogged gap.
     - enter_ts / pause_ms_since_enter: per-phase, for pause-corrected durations.
     - dispatch_ts / pause_ms_since_dispatch: the same per component, so a
-      component_done can be timed from its agent_dispatch.
+      component_done can be timed from its agent_dispatch. When the dispatch
+      carries detail.started_at (backfill after inline serial execution — runs
+      8-10 logged dispatch+done in the same second, recording 0s against real
+      minutes), that timestamp becomes the effective start and
+      dispatch_backfilled marks the pair so the report can flag it.
+    - dispatch_phase: which phase a dispatch was opened in, so phase_exit can
+      reap the ones never paired. Run 9's P0/P1/P2 dispatches were never closed
+      and stayed "in flight" for hours, which reclassified a 7.26h user wait as
+      in-flight silence instead of idle.
     - open_components: dispatched but not yet done — a gap with work in flight
       is silence, not idleness (run 5's T4 did 37.8 min of silent work and the
       pause heuristic charged it to idle, recording duration 0).
+    - last_interaction_ts: ts of the latest user_loop / debt_signoff / pause —
+      the freshness floor a closing report.md must postdate. Runs 8-9 generated
+      the report before the sign-off, so "user wait 0.0s / debts unsigned" in
+      the closing record contradicted the final state.
     - user_loop_triggers: which USER LOOP triggers have already been recorded.
     - latest_debt_user_loop_seq / latest_g5_pwc_seq: the exact authority chain for
       a debt sign-off. Existence alone was too weak: an old debt question could be
@@ -315,7 +354,9 @@ def _scan_log(run_dir):
     facts = {"enters": {}, "exits": {}, "last_ts": None,
              "enter_ts": {}, "pause_ms_since_enter": {},
              "dispatch_ts": {}, "pause_ms_since_dispatch": {},
+             "dispatch_backfilled": {}, "dispatch_phase": {},
              "open_components": set(),
+             "last_interaction_ts": None,
              "user_loop_triggers": set(),
              "latest_debt_user_loop_seq": None,
              "latest_g5_pwc_seq": None}
@@ -342,7 +383,15 @@ def _scan_log(run_dir):
             elif ev == "agent_dispatch":
                 comp = det.get("component") or det.get("task")
                 if comp:
-                    facts["dispatch_ts"][comp] = r.get("ts")
+                    # Backfilled dispatches declare when the work really began;
+                    # an unparseable started_at falls back to the event ts rather
+                    # than poisoning every duration computed from it.
+                    started = det.get("started_at")
+                    facts["dispatch_ts"][comp] = (
+                        started if _parse_ts(started) else r.get("ts"))
+                    facts["dispatch_backfilled"][comp] = bool(
+                        started and _parse_ts(started))
+                    facts["dispatch_phase"][comp] = ph
                     facts["pause_ms_since_dispatch"][comp] = 0
                     facts["open_components"].add(comp)
             elif ev == "component_done":
@@ -354,10 +403,14 @@ def _scan_log(run_dir):
                     facts["user_loop_triggers"].add(trig)
                 if trig == "debt_signoff":
                     facts["latest_debt_user_loop_seq"] = r.get("seq")
+                facts["last_interaction_ts"] = r.get("ts")
+            elif ev == "debt_signoff":
+                facts["last_interaction_ts"] = r.get("ts")
             elif (ev == "gate_verdict" and ph == "G5"
                   and r.get("verdict") == "PASS_WITH_CONCERNS"):
                 facts["latest_g5_pwc_seq"] = r.get("seq")
             elif ev == "pause":
+                facts["last_interaction_ts"] = r.get("ts")
                 gap = det.get("gap_ms") or 0
                 # Match the writer: only idle-credited pauses subtract. Older
                 # logs predate the flag and default to idle. Without this check
@@ -534,6 +587,8 @@ def _derive_next_action(phase, event, verdict, st):
                     if debts else "run P6")
     if event == "component_done":
         return f"continue {phase} with the next component"
+    if event == "run_aborted":
+        return "run aborted — see abort_reason; do not resume this run"
     if event == "user_loop":
         return "awaiting the user's answer"
     if event == "phase_enter":
@@ -711,21 +766,48 @@ def cmd_event(a):
             # pipeline enter P6, perform integration/cleanup work, and discover at
             # the last line that it never had authority to ship the debt. Keep the
             # exit check as defense in depth, but put the real stop at the entrance.
+            #
+            # v1.14.0: this latch has NO --force. The compliant path IS asking the
+            # user, so "skip asking" has no legal form — yet runs 8 and 9 both
+            # forced it and then asked for the sign-off INSIDE P6, which the error
+            # text itself had suggested ("re-run with --force"). The same ask, one
+            # step earlier, satisfies the latch; --force only converted the
+            # orchestrator's impatience into a bypass. Authority latches stay
+            # unforceable; mechanical ones keep the escape hatch.
             unsigned = st.get("debts") or []
             if unsigned:
-                if not a.force:
-                    raise CCLogError(
-                        f"refusing to log phase_enter P6: {len(unsigned)} debt(s) "
-                        f"still await user sign-off {unsigned}. G5 "
-                        f"PASS_WITH_CONCERNS opens P6 only after a real "
-                        f"debt_signoff (preceded by a user_loop and carrying the "
-                        f"user's answer). Green CI or a deadline cannot grant that "
-                        f"authority. Ask and record the sign-off first. If the "
-                        f"bypass is intentional, re-run with --force.")
-                violations.append({
-                    "rule": "P6 may only be entered after all G5 debts are "
-                            "signed off by the user",
-                    "actual": f"{len(unsigned)} unsigned debt(s): {unsigned}"})
+                raise CCLogError(
+                    f"refusing to log phase_enter P6: {len(unsigned)} debt(s) "
+                    f"still await user sign-off {unsigned}. G5 "
+                    f"PASS_WITH_CONCERNS opens P6 only after a real "
+                    f"debt_signoff (preceded by a user_loop and carrying the "
+                    f"user's answer). There is no --force here: asking the user "
+                    f"is the compliant path, so skipping it is not a decision "
+                    f"anyone can authorize — if the user says 'skip', that "
+                    f"answer IS the sign-off; record it as debt_signoff with "
+                    f"their words. Note report.md needs no P6 entry: "
+                    f"'cc_log.py report' runs from any phase, so generate it "
+                    f"whenever the numbers are wanted.")
+
+    # --- gate_verdict must be spoken inside its gate phase -----------------
+    # Run 10 logged G3's verdict 15s BEFORE phase_enter G3: a backfilled batch
+    # inverted the order, and the enter/verdict/exits of G5 all landed in one
+    # second. A verdict that predates the phase it certifies cannot have been
+    # produced by that gate's run — the sequence itself is the evidence.
+    if a.event == "gate_verdict" and facts["enter_ts"].get(a.phase) is None:
+        if not a.force:
+            raise CCLogError(
+                f"refusing to log gate_verdict {a.phase}: no phase_enter "
+                f"{a.phase} is recorded yet — the verdict must be spoken "
+                f"INSIDE the gate phase, after phase_enter. Log the "
+                f"phase_enter {a.phase} first, then the verdict. (Backfilled "
+                f"batches inverted this order in run 10; the timestamps are "
+                f"the only witness.) If the bypass is intentional, re-run "
+                f"with --force.")
+        violations.append({
+            "rule": f"gate_verdict {a.phase} requires a prior phase_enter "
+                    f"{a.phase}",
+            "actual": f"no phase_enter {a.phase} in run.jsonl"})
 
     # --- unmatched phase_exit --------------------------------------------
     # Run 3 appended a second `P6 phase_exit` (seq 46) against a single
@@ -769,10 +851,11 @@ def cmd_event(a):
         # artifact. Runs 3–5 each finished with a different hand-assembled
         # artifact (or none); without this latch the report would be optional,
         # and optional steps drift.
-        if not os.path.exists(os.path.join(run_dir, "report.md")):
+        report_path = os.path.join(run_dir, "report.md")
+        if not os.path.exists(report_path):
             if not a.force:
                 raise CCLogError(
-                    f"refusing to log phase_exit P6: {run_dir}/report.md does "
+                    f"refusing to log phase_exit P6: {report_path} does "
                     f"not exist. Generate the mechanical processing report "
                     f"before closing the run:\n"
                     f"  python3 cc_log.py report --root <project_dir> "
@@ -785,12 +868,53 @@ def cmd_event(a):
             violations.append({
                 "rule": "P6 exit requires a generated report.md",
                 "actual": f"no report.md in {run_dir}"})
+        # Freshness: the report must postdate the last user-visible event.
+        # Runs 8-9 generated it before the debt sign-off, so the closing record
+        # said "user wait 0.0s / debts unsigned" while the final state was the
+        # opposite on both counts. A report is cheap to regenerate; a report
+        # that disagrees with the log it summarizes is worse than none.
+        else:
+            gen_ts = None
+            try:
+                with open(report_path, encoding="utf-8") as f:
+                    m = re.search(r"生成时间\*\*:\s*(\S+)", f.read())
+                if m:
+                    gen_ts = _parse_ts(m.group(1))
+            except OSError:
+                pass
+            last_int = _parse_ts(facts["last_interaction_ts"])
+            stale = True
+            if gen_ts is not None and last_int is not None:
+                try:
+                    stale = gen_ts < last_int
+                except TypeError:  # naive vs aware mix — cannot prove fresh
+                    stale = True
+            elif last_int is None:
+                stale = False
+            if stale:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log phase_exit P6: {report_path} is "
+                        f"STALE — generated before the last user-visible "
+                        f"event ({facts['last_interaction_ts']}). Runs 8-9 "
+                        f"closed on reports that predated their sign-offs, so "
+                        f"user wait read 0.0s and debts read unsigned while "
+                        f"both had changed. Regenerate it:\n"
+                        f"  python3 cc_log.py report --root <project_dir> "
+                        f"--slug <task-slug>\n"
+                        f"If the bypass is intentional, re-run with --force.")
+                violations.append({
+                    "rule": "P6 exit requires a report.md fresher than the "
+                            "last user interaction",
+                    "actual": f"report predates {facts['last_interaction_ts']}"})
         # Git closure: an uncommitted tree poisons the NEXT run's baseline.
         # Run 5 (etf) closed with "git 收尾" written in its exit detail but
         # never committed; run 6's report then diffed against a stale baseline
         # and listed 19 of run 5's files as its own. A run that finishes must
         # leave a tree whose diff-to-baseline is exactly its own work.
-        elif detail.get("commit") != "deferred":
+        # (Plain if, not elif: under --force each closure defect records its
+        # own violation instead of the first one masking the rest.)
+        if detail.get("commit") != "deferred":
             dirty = _git_out(a.root, "status", "--porcelain") or ""
             dirty = [l for l in dirty.splitlines()
                      if l and not l[3:].startswith(".cc-skill")]
@@ -959,13 +1083,16 @@ def cmd_event(a):
         plan_ptr = detail.get("plan_artifact")
         if not plan_ptr and art:
             # The artifact may itself declare where the plan lives (a
-            # recorded pointer, not a per-run discovery).
+            # recorded pointer, not a per-run discovery). _resolve_path
+            # returns None when the artifact is nowhere on disk — open(None)
+            # raises TypeError, which the except clause below does not catch
+            # (the v1.14.0 test suite hit it with a planless dry-run).
             try:
                 art_path = _resolve_path(art, os.path.join(run_dir, art),
                                          os.path.join(a.root, art))
                 with open(art_path, encoding="utf-8") as f:
                     plan_ptr = (json.load(f) or {}).get("plan_artifact")
-            except (OSError, json.JSONDecodeError):
+            except (OSError, TypeError, json.JSONDecodeError):
                 plan_ptr = None
 
         plan = _plan_graph(run_dir, a.root, art, plan_ptr)
@@ -1114,6 +1241,60 @@ def cmd_event(a):
             violations.append({
                 "rule": "component_done requires a matching agent_dispatch",
                 "actual": f"no agent_dispatch recorded for {comp!r}"})
+
+    # --- dispatches must say WHO ran them ---------------------------------
+    # Runs 8-11 logged every agent_dispatch with agent=None and no skills —
+    # run 5 carried both, so this is a regression, not a tool limit. Without
+    # them the augmentation-ROI audit (ca-process-tuning's input) cannot tell
+    # "fired and changed nothing" from "was never installed". A latch validates
+    # what it checks; unvalidated fields get dropped.
+    if a.event == "agent_dispatch":
+        if not (a.agent or "").strip():
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log agent_dispatch: --agent is required — "
+                    "the dispatched role (e.g. ca-clean-implementer), or "
+                    "'orchestrator' when the orchestrator does the work "
+                    "itself. Runs 8-11 logged every dispatch with no agent, "
+                    "blinding the augmentation-ROI audit: it can no longer "
+                    "tell which agent or skill mix produced which component. "
+                    "If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "agent_dispatch must name its agent",
+                "actual": "--agent missing/empty"})
+        if a.phase == "P4" and not (a.skills or "").strip():
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log agent_dispatch (P4): --skills is "
+                    "required — the methodology skills injected into the "
+                    "implementer (e.g. ca-dependency-rule,"
+                    "ca-layer-boundaries). This is the field the per-layer "
+                    "injection matrix exists to fill; an empty value records "
+                    "that a component was built with no methodology at all. "
+                    "If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "P4 agent_dispatch must name its injected skills",
+                "actual": "--skills missing/empty"})
+
+    # --- run_aborted: the honest way to kill a false start ----------------
+    # Run 10's cache-key pre-item was a false start: init → P0 → scope error
+    # → three --force'd latch violations posing as "undo". The vocabulary had
+    # no abort, so the only exits were "hang forever" or "disguise a
+    # non-event as three MAJOR violations", which pollutes the violation
+    # statistics that real signals depend on.
+    if a.event == "run_aborted":
+        if not str(detail.get("reason") or "").strip():
+            if not a.force:
+                raise CCLogError(
+                    "refusing to log run_aborted: --detail must carry the "
+                    "reason, e.g. '{\"reason\":\"scope error discovered in "
+                    "P0: this pre-item belongs to the DCF M3 run, not its own "
+                    "task\"}'. An abort without a reason is indistinguishable "
+                    "from a crash and teaches the next run nothing. If the "
+                    "bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "run_aborted must record its reason",
+                "actual": "no reason in --detail"})
 
     # --- user_loop must be a real question, batched, and looked up first ----
     # This was the only significant event in the system with no required detail
@@ -1280,6 +1461,55 @@ def cmd_event(a):
                           f"latest_pwc={pwc_seq!r}"})
 
     seq = next_seq(run_dir)
+
+    # --- phase_exit / run_aborted reaps stale dispatches -------------------
+    # A dispatch opened inside a phase belongs to that phase: if the phase is
+    # closing and the dispatch was never paired with a component_done, it is
+    # stale bookkeeping, not work in flight. Run 9's P0/P1/P2 dispatches were
+    # never closed, so every later pause heuristic saw them as "components
+    # executing" and reclassified a 7.26h user wait as in-flight silence
+    # instead of idle. Reap them (AUTO_CLOSED, with the pairing gap measured)
+    # BEFORE the pause annotation below, so the heuristic judges the real
+    # in-flight set. run_aborted reaps across ALL phases — an aborted run has
+    # no legitimate open work left.
+    if a.event in ("phase_exit", "run_aborted"):
+        if a.event == "run_aborted":
+            reaped_names = sorted(facts["open_components"])
+        else:
+            reaped_names = sorted(
+                c for c in facts["open_components"]
+                if facts["dispatch_phase"].get(c) == a.phase)
+        for c in reaped_names:
+            dur = _elapsed_ms_since_dispatch(facts, c)
+            _append_jsonl(run_dir, _event_rec(
+                st.get("run_id"), seq, a.phase, "component_done",
+                {"component": c, "status": "AUTO_CLOSED",
+                 "reason": (f"dispatch opened in {facts['dispatch_phase'].get(c)} "
+                            f"never paired with component_done; reaped at "
+                            f"{a.event} so it stops masking pause accounting"
+                            if a.event == "phase_exit" else
+                            "run aborted; reaped so the ledger closes clean")},
+                duration_ms=dur))
+            _apply_state_effects(st, a.phase, "component_done", None,
+                                 {"component": c, "status": "AUTO_CLOSED"},
+                                 seq, duration_ms=dur)
+            facts["open_components"].discard(c)
+            seq += 1
+
+    # --- run_aborted stamps the manifest and freezes the state -------------
+    if a.event == "run_aborted":
+        st["phase_status"] = "aborted"
+        mp = os.path.join(run_dir, "manifest.json")
+        try:
+            with open(mp, encoding="utf-8") as f:
+                m = json.load(f)
+            m["end"] = now_iso()
+            m["aborted"] = True
+            m["abort_reason"] = detail.get("reason")
+            atomic_write(mp, json.dumps(m, ensure_ascii=False, indent=2))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"cc_log: WARNING manifest.json not stamped aborted ({e})",
+                  file=sys.stderr)
 
     # --- unlogged gap annotation -----------------------------------------
     # Run 3 has 6h18m of silence between seq 37 and seq 38 with no marker, which
@@ -1520,34 +1750,40 @@ def cmd_report(a):
     wall_ms = int((t1 - t0).total_seconds() * 1000) if (t0 and t1) else None
 
     # --- per-phase: recorded (pause-corrected) vs raw (enter→exit timestamps)
-    phase_rec, phase_raw, enter_ts = {}, {}, {}
+    phase_rec, phase_raw, enter_ts, exit_ts = {}, {}, {}, {}
     for e in events:
         ph, ev = e.get("phase"), e.get("event")
         if ev == "phase_enter":
             enter_ts[ph] = e.get("ts")
         elif ev == "phase_exit":
+            exit_ts[ph] = e.get("ts")
             if e.get("duration_ms") is not None:
                 phase_rec[ph] = e["duration_ms"]
             s, x = _parse_ts(enter_ts.get(ph)), _parse_ts(e.get("ts"))
             if s and x:
                 phase_raw[ph] = int((x - s).total_seconds() * 1000)
 
-    # --- per-component: same two views, from dispatch to done
-    dispatch_ts, comp = {}, {}
+    # --- per-component: same two views, from dispatch to done --------------
+    # started_at (backfill after inline serial execution) is the effective
+    # start when present: runs 8-10 logged dispatch+done in the same second
+    # and recorded 0.5-0.9s against real minutes — a 600x ledger error.
+    dispatch_ts, backfilled, comp = {}, {}, {}
     for e in events:
         ev, det = e.get("event"), e.get("detail") or {}
         name = det.get("component") or det.get("task")
         if not name:
             continue
         if ev == "agent_dispatch":
-            dispatch_ts[name] = e.get("ts")
+            started = det.get("started_at")
+            dispatch_ts[name] = started if _parse_ts(started) else e.get("ts")
+            backfilled[name] = bool(started and _parse_ts(started))
         elif ev == "component_done":
             rec = {"status": det.get("status", "DONE")}
             if e.get("duration_ms") is not None:
                 rec["rec"] = e["duration_ms"]
             s, x = _parse_ts(dispatch_ts.get(name)), _parse_ts(e.get("ts"))
             if s and x:
-                rec["raw"] = int((x - s).total_seconds() * 1000)
+                rec["raw"] = max(0, int((x - s).total_seconds() * 1000))
             if det.get("tests"):
                 rec["tests"] = det["tests"]
             comp[name] = rec
@@ -1617,6 +1853,58 @@ def cmd_report(a):
         overlap_note = ("计划含多组件 wave 但零重叠 —— 可并行而未并行"
                         "（对照 wave 计划与串行执行原因）")
 
+    # --- suspected suspensions: in-flight pauses longer than SUSPEND_MS -----
+    # An overnight gap with a component "in flight" is usually a suspended
+    # session, not hours of execution (run 11's C6_frontend sat 8.9h overnight
+    # and read as component/P4 wall time, burying the 1.19x active parallelism
+    # under 1.01x). Keep the wall numbers but flag them and compute a
+    # suspension-adjusted view: the active ratio is what tells tuning whether
+    # the wave structure actually overlapped.
+    suspensions = []
+    for e in events:
+        if e.get("event") != "pause":
+            continue
+        det = e.get("detail") or {}
+        if (not det.get("credited_to_idle", True)
+                and (det.get("gap_ms") or 0) > SUSPEND_MS):
+            since = _parse_ts(det.get("since"))
+            if since:
+                suspensions.append((since, since + datetime.timedelta(
+                    milliseconds=det["gap_ms"]),
+                    det.get("components_in_flight") or []))
+
+    def _active_ms(start, end):
+        """Wall span minus its overlap with suspected-suspension windows."""
+        try:
+            total = (end - start).total_seconds() * 1000
+        except TypeError:
+            return None
+        for s, x, _ in suspensions:
+            try:
+                ov = (min(end, x) - max(start, s)).total_seconds() * 1000
+            except TypeError:
+                continue
+            if ov > 0:
+                total -= ov
+        return max(0.0, total)
+
+    parallel_active = None
+    if suspensions:
+        comp_active_sum = 0.0
+        for name, r in comp.items():
+            if r.get("raw") is None or not dispatch_ts.get(name):
+                continue
+            d = _parse_ts(dispatch_ts[name])
+            if d is None:
+                continue
+            act = _active_ms(d, d + datetime.timedelta(milliseconds=r["raw"]))
+            if act is not None:
+                comp_active_sum += act
+        p4s, p4x = _parse_ts(enter_ts.get("P4")), _parse_ts(exit_ts.get("P4"))
+        p4_active = _active_ms(p4s, p4x) if (p4s and p4x) else None
+        if p4_active and comp_active_sum:
+            parallel_active = comp_active_sum / p4_active
+
     def _flag(rec, raw):
         if rec is None or raw is None:
             return ""
@@ -1677,12 +1965,19 @@ def cmd_report(a):
     L.append(f"| 空转（pause·计为空闲） | {_fmt_dur(idle_ms)} |")
     if inflight_gaps:
         L.append(f"| 在制静默（pause·未计空闲，见 F1 修复说明） | {inflight_gaps} 段 |")
+    for s, x, s_comps in suspensions:
+        L.append(f"| ⚠ 疑似挂起 | {_fmt_dur(int((x - s).total_seconds() * 1000))}"
+                 f"（in-flight {s_comps} 静默 >2h —— 会话挂起而非执行，"
+                 f"已计入组件/阶段墙钟） |")
     if parallel:
         wave_desc = (f"（计划最大 wave {planned_wave} 组件 / 实际重叠 "
                      f"{actual_overlap} 对）"
                      if planned_wave is not None else "")
         L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x "
                  f"{wave_desc} |")
+    if parallel_active:
+        L.append(f"| P4 并行度（活跃口径，剔除疑似挂起段） | "
+                 f"{parallel_active:.2f}x |")
     if overlap_note:
         L.append(f"| ⚠ 并行机会 | {overlap_note} |")
     L.append("")
@@ -1702,12 +1997,15 @@ def cmd_report(a):
         L.append("| 组件 | 状态 | 记录耗时¹ | 墙钟 | 测试 |")
         L.append("|---|---|---|---|---|")
         for name, r in comp.items():
-            L.append(f"| {name} | {r['status']} | {_fmt_dur(r.get('rec'))}"
+            bf = "*" if backfilled.get(name) else ""
+            L.append(f"| {name}{bf} | {r['status']} | {_fmt_dur(r.get('rec'))}"
                      f"{_flag(r.get('rec'), r.get('raw'))}"
                      f" | {_fmt_dur(r.get('raw'))} | {r.get('tests', '—')} |")
         L.append("")
-        L.append("¹ 记录耗时 = pause 校正值；标 ⚠ 表示与墙钟偏差超过 20% —— 通常是"
-                 "旧版本日志的 pause 记账误差或事件分批补写，以墙钟列为准。")
+        L.append("¹ 记录耗时 = pause 校正值；标 ⚠ 表示与墙钟偏差超过 20%，以墙钟列为准；"
+                 "组件名带 \\* 表示 dispatch 为补录（detail.started_at 声明真实开始时刻，"
+                 "墙钟从该时刻起算——内联串行执行后补记时必须给出，"
+                 "否则 dispatch/done 同刻会把几分钟记成 0 秒）。")
         L.append("")
     gv = st.get("gate_verdicts") or {}
     loops = st.get("loops") or {}
@@ -1753,6 +2051,13 @@ def cmd_report(a):
         L.append("")
         L.append("> 注意：清单为基线以来的全部工作区改动；若基线前已有未提交工作，"
                  "可能混入本次运行之外的文件。")
+        dirty0 = manifest.get("dirty_at_init")
+        if dirty0:
+            L.append(">")
+            L.append(f"> ⚠ init 时工作区已有 {dirty0} 个未提交文件"
+                     f"（如 {manifest.get('dirty_at_init_sample')}）——"
+                     f"本清单可能混入上一轮的交付，归因以下一轮干净基线为准"
+                     f"（run 9 曾把 run 8 的 18 个文件记成自己的新增）。")
     L.append("")
     out = os.path.join(run_dir, "report.md")
     atomic_write(out, "\n".join(L) + "\n")

@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.13.1 -->
+<!-- clean-architecture system v1.14.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -246,9 +246,18 @@ per-dispatch context injection outweighs the overlap saved. Decide per run:
   (≳15 min each) and boundary-clean — the v1.6.0 contract-dependency shape
   (presentation on `consumes_contract`, backend independent) is exactly this.
 - **Execute inline serially** when components are small or share heavy existing
-  context; still log dispatch/done per component (backfilled at completion is
-  acceptable — record `"note":"backfilled, single session"`) so per-component
-  cost stays measurable.
+  context; still log dispatch/done per component so per-component cost stays
+  measurable. Backfilling at completion is acceptable, but a backfilled dispatch
+  MUST declare `"started_at":"<iso of the real start>"` (v1.14.0): runs 8–10
+  logged dispatch+done in the same second and recorded 0.5–0.9s against real
+  minutes — a 600x ledger error. The pairing timer and the report's raw column
+  both use `started_at` when present; the report marks such components `*`.
+
+Every dispatch names its agent (`--agent ca-clean-implementer`, or
+`orchestrator` for the orchestrator's own work) and, in P4, its injected skills
+(`--skills ...`) — both are latched (v1.14.0). Runs 8–11 dropped both fields and
+the augmentation-ROI audit went blind: it could no longer tell which agent or
+skill mix produced which component.
 
 The report's planned-vs-actual overlap row is the honest signal of which
 choice a run made and whether the parallelism was real.
@@ -448,7 +457,13 @@ bearing ones and they ship in this repo.
 - Verdict: `PASS` → P6; `PASS_WITH_CONCERNS` → P6 only after the named debts are
   signed off by the user (`--detail '{"debts_awaiting_signoff":[...]}'` on the
   verdict, then a `debt_signoff` event — the P6 *entry* latch enforces it, with the
-  exit latch retained as defense in depth); `FAIL` →
+  exit latch retained as defense in depth). **This entry latch has NO --force
+  (v1.14.0)**: asking the user IS the compliant path, so "skip asking" has no
+  legal form. Runs 8 and 9 both forced it and then asked for the sign-off inside
+  P6 — the same question one step earlier satisfies the latch; `--force` only
+  converted impatience into a bypass. If the user says "skip", that answer IS a
+  sign-off: record it. Generating report.md needs no P6 entry — `cc_log.py
+  report` runs from any phase; `FAIL` →
   route BLOCKERs to P4 (code) or P2 (structural) with precise scope, increment
   `gate5_iterations` (capped at 2, then escalate to the user).
 
@@ -464,12 +479,20 @@ bearing ones and they ship in this repo.
   ```
   It assembles the closing record from the logs — never hand-written: wall clock,
   per-phase and per-component durations (recorded vs raw, with ⚠ on divergence),
-  P4 parallelism ratio, user wait per pause, idle pauses, gate verdicts and
+  P4 parallelism ratio (wall view, plus an active view that strips suspected
+  suspensions — in-flight pauses >2h are usually a parked session, not
+  execution; run 11's 8.9h overnight gap read as component time and buried the
+  real 1.19x under 1.01x), user wait per pause, idle pauses, gate verdicts and
   iterations, signed-off debts, question ledger, and the git change list diffed
-  against the baseline commit `init` recorded in the manifest.
-  `cc_log.py` refuses `phase_exit P6` without it. Runs 3–5 each finished with a
-  different hand-assembled artifact (or none); optional closing steps drift, so
-  this one is gated like every other artifact.
+  against the baseline commit `init` recorded in the manifest (init also counts
+  the dirty tree it started from; the report warns when inherited uncommitted
+  work may be mixed into the change list — run 9 claimed run 8's 18 files).
+  `cc_log.py` refuses `phase_exit P6` without it, and — v1.14.0 — **refuses a
+  report older than the last user interaction**: runs 8–9 generated it before
+  the sign-off and closed on "user wait 0.0s / debts unsigned" while both had
+  changed. Regenerate after every sign-off or answer. Runs 3–5 each finished
+  with a different hand-assembled artifact (or none); optional closing steps
+  drift, so this one is gated like every other artifact.
 - Exit: accepted, integrated work + `summary.md` (prose) + `report.md`
   (mechanical) + a summary of `debts`/follow-ups.
 
@@ -738,7 +761,7 @@ Naming rules for `<task-slug>`:
            skill_inject|superpower_used|superpower_unavailable|gate_verdict|
            gate_invalidated|gate_scope_narrowed|loop_increment|user_loop|
            debt_signoff|pause|conflict_logged|process_violation|
-           artifact_written|error",
+           artifact_written|run_aborted|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
@@ -767,6 +790,17 @@ Rules:
   out-of-order phase, tests written after the code. Do NOT file these under
   `error`, which is for environment failures and retracted findings; mixing them
   makes both uncountable.
+- **`run_aborted` for a false start (v1.14.0), never gate-forcing as "undo".**
+  If a task turns out to be mis-scoped after it began (a pre-item that belongs
+  to another run, a duplicated slug), end it with
+  `--event run_aborted --detail '{"reason":"..."}'` from whatever phase it is
+  in. The event stamps `manifest.aborted`, reaps every open dispatch and leaves
+  an honest terminal state. Run 10's cache-key pre-item instead forced three
+  gate violations to "close" — polluting the violation statistics real signals
+  depend on. `phase_exit` now also reaps dispatches opened in that phase but
+  never paired, so a stale P0/P1 dispatch can no longer masquerade as "work in
+  flight" hours later and reclassify a user wait as in-flight silence (run 9's
+  7.26h).
 - `detail.fallback` is one of `applied` | `partial` | `none`. Use **`partial`**
   when only some of the augmentation's intent could be substituted (e.g. import
   checks done, but test evidence unobtainable) — and say which half is missing.
