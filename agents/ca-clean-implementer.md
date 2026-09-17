@@ -1,6 +1,6 @@
 ---
 name: ca-clean-implementer
-version: 1.14.0
+version: 1.15.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
 skills: [ca-dependency-rule, ca-solid-principles, ca-layer-boundaries]
 phase: 4
@@ -141,6 +141,20 @@ path. Run 6's broken catalog parse made every search miss, the Enter fallback
 fired every time and succeeded, and the E2E passed. When a component has a
 fallback, the live check must show the non-fallback path succeeding once
 (e.g. type a known prefix → a dropdown match appears).
+
+**Browser re-verification applies to EVERY change of a frontend component
+file, not only its first build.** First-build live checks (run 11's C6 caught
+3 real browser bugs) certify the component AS BUILT — they are not a permanent
+immunity badge for the file. Run 12's iteration period modified
+`vertical_spread.js` repeatedly without any browser run and shipped three
+regressions in a row (header render lost when the module was rewritten and
+`_headHtml` never re-mounted; matrix expansion moving to the wrong container;
+duplicate scan buttons after merging preset/custom flows) — all in the file
+the first build had verified, none caught before commit. The mechanical rule:
+if your diff touches a file the component's `live_verification` evidence
+names, a browser check of the AFFECTED interaction is part of YOUR done
+criteria; cite it in your own evidence. A static-assertion test suite does not
+substitute — all three run-12 regressions passed their static tests.
 
 ## Superpowers Augmentation
 - `test-driven-development` (skill) — drives **batched Red-Green** TDD: write

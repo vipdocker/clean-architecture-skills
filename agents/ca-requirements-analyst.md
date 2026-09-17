@@ -1,6 +1,6 @@
 ---
 name: ca-requirements-analyst
-version: 1.14.0
+version: 1.15.0
 description: Phase 1 agent. Turns raw requirements (PRD, feature request, user story) into a policy-first model — Entities and Use Cases — deferring all framework/DB/UI details. Produces the artifact that drives the whole Clean Architecture pipeline.
 skills: [ca-use-case-extraction]
 phase: 1
@@ -40,13 +40,24 @@ web framework, or UI — you defer them as ports.
   entities: [{name, data[], invariants[], behavior[]}],
   use_cases: [{name, request_model, response_model, ports:{input,output,data[]}, steps[]}],
   deferred_details: [{requirement, restated_as_port}],
+  domain_classification: [{use_case, class, citation}],   // when the domain has a
+                                                          // first-order axis (debit/
+                                                          // credit, long/short, ...)
   open_questions: [ ... ]
 }
 ```
 
+`domain_classification` is REQUIRED whenever the domain hangs on a first-order
+class (run 12 shipped a whole feature with the strategy direction reversed —
+credit built where the SDD asked for debit — because the axis lived nowhere in
+this artifact). Each entry cites the requirement text or SDD section that
+justifies the class; ambiguity on the axis is an open_question, never a silent
+default.
+
 ## Definition of Done
 Every requirement line is mapped to an entity, a use case, a port, or an open
-question. Nothing technology-specific leaks into the model.
+question. Nothing technology-specific leaks into the model. Where a first-order
+domain axis exists, every affected use case carries its class with a citation.
 
 ## Superpowers Augmentation
 - `brainstorming` (skill) — MANDATORY before modeling: explore intent/requirements

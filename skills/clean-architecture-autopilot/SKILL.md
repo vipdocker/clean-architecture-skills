@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.14.0 -->
+<!-- clean-architecture system v1.15.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -866,6 +866,66 @@ End-to-end lifecycle of a scoped fix after G5 FAIL:
 
 If G5 delta FAILs, `g5_delta_scopes` is preserved, the loop iterates (bounded by
 `gate5_iterations ≤ 2`), and only the still-failing scope gets another fix pass.
+
+---
+
+## Iteration Tasks (the lightweight path — post-first-build changes)
+
+The full pipeline certifies a first build. What happened after phase-a (run 11)
+was 28 commits / 59 files / +5304−918 over three days — including TWO breaking
+changes (credit→debit strategy switch, σ√t width floor) — with **zero pipeline
+coverage**: no gate saw any of it. The tooling was never the blocker; the prose
+offered only "full pipeline" (too heavy for a preset tweak) and "no pipeline"
+(unaccounted), so every iteration landed in the second bucket. This section is
+the third bucket.
+
+### When each path applies (mechanical, decide before writing code)
+
+| The change touches… | Path |
+|---|---|
+| Copy, styles, typos, dead text — **zero behavior change** | No pipeline. Commit message states the scope ("docs only", "style only"). |
+| Any behavior change in an existing feature | **Iteration task** (this section). |
+| New feature/module, or a change that redraws boundaries/components | Full pipeline (P0→P6). |
+| **Analyzer GATE constants, strategy semantics, entry/exit leg logic, probability/IV math, rejection-reason taxonomy — or anything breaking** | Iteration task **with a delta G5 mandatory** (see trigger below). |
+
+The trigger row is the lesson of run 12: the σ√t commit rewired what "width
+means" across every preset and the debit switch reversed the strategy's
+first-order classification — exactly the class of change G5 exists to review —
+and neither saw a gate because no iteration path existed.
+
+### The iteration flow (fresh run, compressed phases)
+
+A new, short run — never append to the original run's log (its baseline commit
+would attribute months of intermediate work to this iteration):
+
+```bash
+python3 cc_log.py init --root <dir> --slug <feature>-iter-<one-word>
+# P1 (requirements delta): what behavior changes and why — cite the SDD/issue
+#   section or the user feedback verbatim (the σ√t commit's evidence was the
+#   user's "杠杆 ETF 一天浮动就超过了宽度" plus 4-symbol σ/width data)
+# P2 (design delta): plan = changed components with their layers;
+#   design_source = the ORIGINAL SDD when one exists (its constraints still bind)
+# G3: mechanical — ast-grep import scan of the touched files only
+# P4: dispatch per component (agent + skills + started_at), implement, done
+# G5: verdict with review_mode "delta", findings scoped to changed components
+# P6: report + git closure, same latches as a full run
+```
+
+All v1.14.0 latches apply unchanged (unforceable P6 entry, report freshness,
+`dirty_at_init` warning — an iteration starting on a dirty tree sees the
+mixed-attribution warning, which is exactly right). G3 stays in the flow: at
+~4-6% of wall clock it is not the cost center, and skipping it would re-open
+the hole it exists to guard.
+
+### What makes a delta G5 honest
+
+`review_mode: "delta"` certifies **the changed behavior against the changed
+files**, not a re-run of the full checklist. Its findings must carry `scope`
+naming the changed components; a delta PASS over a semantics change (the
+trigger row) must state in evidence why the new semantics hold — data for
+quantified changes (the σ√t commit validated TQQQ 0.3x / SOXL 1.5x / MU 6.6x
+daily-σ-to-width ratios before switching presets), user-cited intent for
+direction changes (the debit switch quoted SDD v1.6 §4.6 back at the user).
 
 ---
 

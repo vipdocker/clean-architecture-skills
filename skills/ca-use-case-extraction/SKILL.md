@@ -2,7 +2,7 @@
 name: ca-use-case-extraction
 description: Extracts Entities and Use Cases from raw requirements the Clean Architecture way — separating enterprise business rules (Entities) from application business rules (Use Cases), and defining request/response models plus the interactor for each. Use at the start of a design, when turning a PRD/feature request/user story into a policy-first model before choosing any framework or database. Language-agnostic. Not for layering an already-extracted model (use ca-layer-boundaries), for writing a general PRD or feature spec, or for reviewing finished code (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.14.0 -->
+<!-- clean-architecture system v1.15.0 -->
 
 # Use Case & Entity Extraction
 
@@ -86,7 +86,25 @@ Emit:
   entities: [{name, data[], invariants[], behavior[]}],
   use_cases: [{name, request_model, response_model,
                ports:{input, output, data[]}, steps[]}],
-  deferred_details: [{requirement, restated_as_port}]
+  deferred_details: [{requirement, restated_as_port}],
+  domain_classification: [{use_case, class, citation}]   // strategy domains only
 }
 ```
 This artifact is the input to `ca-layer-boundaries` and the architecture design phase.
+
+### `domain_classification` — first-order domain classes must be explicit
+
+When the domain has a **first-order classification** the whole model hangs on —
+for trading strategies: debit / credit / neutral-hedge, long / short, or the
+equivalent axis elsewhere (batch vs streaming, buy vs rent, gross vs net) —
+every affected use case MUST carry it as an explicit field, with a `citation`
+quoting the requirement text or SDD section that justifies the choice. Run 12
+built an entire vertical-spread feature as a CREDIT spread while the user's
+intent (SDD v1.6 §4.6: "BUY_OPEN Call + SELL_OPEN Call" for cheaper directional
+exposure, not premium collection) was a DEBIT spread — the phase-a pipeline
+passed brainstorming, G3 and G5 with the direction reversed, because "credit vs
+debit" existed nowhere in the artifact for anything to check against. A class
+this load-bearing is not an implementation detail; it is part of the policy the
+requirements phase exists to pin. If the requirement text is ambiguous on the
+axis, that ambiguity is an `open_question` (information-gap user loop), never a
+silent default.

@@ -2,7 +2,7 @@
 name: ca-architecture-review-checklist
 description: A gate-style review checklist that scores a design/codebase against all Clean Architecture principles (Dependency Rule, SOLID, component cohesion/coupling, boundaries, testability) and returns pass/fail with severity-ranked findings. Use as the final quality gate before accepting an architecture or merging code, or to audit an existing system. Language-agnostic. Not for designing boundaries in the first place (use ca-layer-boundaries), for the cheaper pre-code dependency-direction audit (use ca-dependency-rule), or for judging whether the PROCESS itself needs tuning (use ca-process-tuning).
 ---
-<!-- clean-architecture system v1.14.0 -->
+<!-- clean-architecture system v1.15.0 -->
 
 # Clean Architecture Review Checklist (Quality Gate)
 
@@ -89,6 +89,17 @@ follow-up review.
 - [ ] Boundary granularity matches the real axis of change (facade / one-dim / full).
 - [ ] Screaming architecture: top-level dirs name the domain, not the framework.
 - [ ] Framework/DB/UI are plugins at the edge; decisions deferred correctly.
+- [ ] **First-order domain classes match the P1 artifact**: where the domain hangs
+      on a load-bearing axis (debit/credit, long/short, batch/streaming), the
+      implementation's actual classification must equal `domain_classification[]`
+      from the requirements artifact, and the artifact must carry it. Check the
+      legs, not the labels: a spread named "bull call" that SELLS the long leg
+      and BUYS the short one is a credit structure whatever the string says.
+      Run 12 shipped an entire feature with the strategy direction reversed
+      (credit built where SDD §4.6 asked for debit) through a fully green
+      pipeline — the gates check structure, and this axis lived in no artifact.
+      In delta mode over a semantics change, this item is the core of the
+      review, not an extra.
 
 ## Section E — Testability
 - [ ] Business rules are unit-testable without DB, web, or UI (Humble Object applied).
