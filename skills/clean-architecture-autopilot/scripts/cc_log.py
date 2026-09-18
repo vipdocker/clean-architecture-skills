@@ -1275,6 +1275,83 @@ def cmd_event(a):
             violations.append({
                 "rule": "P4 agent_dispatch must name its injected skills",
                 "actual": "--skills missing/empty"})
+        # F3: a dispatch must be logged while its phase is OPEN. Run 13 wrote
+        # P1's dispatch/done AFTER phase_exit P1 (a backfill ordering slip), so
+        # the pair's phase attribution dangled outside any open phase — and
+        # paired with the fabricated started_at, both errors compounded. The
+        # work belongs to the phase that was executing when it began; logging
+        # it after the phase closed breaks that attribution. Log dispatch
+        # BEFORE phase_exit, or accept the mechanical refusal.
+        opened = (facts["enters"].get(a.phase, 0)
+                  > facts["exits"].get(a.phase, 0))
+        if not opened:
+            if not a.force:
+                raise CCLogError(
+                    f"refusing to log agent_dispatch: phase {a.phase} has "
+                    f"exited (enters={facts['enters'].get(a.phase, 0)}, "
+                    f"exits={facts['exits'].get(a.phase, 0)}). A dispatch "
+                    f"records work BEGINNING in an open phase; logging it "
+                    f"after the phase closed (run 13 did this for P1) breaks "
+                    f"the phase attribution. Log the dispatch before the "
+                    f"phase_exit, or log it against the phase actually open. "
+                    f"If the bypass is intentional, re-run with --force.")
+            violations.append({
+                "rule": "agent_dispatch must be logged while its phase is open",
+                "actual": f"phase {a.phase} not open "
+                          f"(enters={facts['enters'].get(a.phase, 0)}, "
+                          f"exits={facts['exits'].get(a.phase, 0)})"})
+        # started_at credibility: the field is BACKFILL-ONLY, and its value
+        # must be plausible. Run 13 attached one to every dispatch — synthetic
+        # round timestamps (00:00, 00:10, 00:20…) that predated the run by
+        # ~12h — inflating every component to 4h+ and printing a physically
+        # impossible 261x parallelism. A field's PRESENCE is not its TRUTH:
+        # this is the third manifestation of the same minimal-compliance game
+        # (run 5 pause-swallow, runs 8-10 same-second backfill, run 13
+        # fabricated stamps). The plausible window is [phase_enter of this
+        # phase, the dispatch event's own ts]: work cannot start before its
+        # phase opened, nor after the moment the dispatch is recorded.
+        started = detail.get("started_at")
+        if started is not None:
+            s_ts = _parse_ts(started)
+            phase_open = _parse_ts(facts["enter_ts"].get(a.phase))
+            now = datetime.datetime.now().astimezone()
+            bad = None
+            if s_ts is None:
+                bad = "unparseable timestamp"
+            else:
+                # Normalize naive stamps (run 13's fabrications carried no
+                # timezone) to aware before comparing against aware ts —
+                # naive-vs-aware raises TypeError instead of comparing.
+                if s_ts.tzinfo is None:
+                    s_ts = s_ts.replace(tzinfo=now.tzinfo)
+                if phase_open is not None and phase_open.tzinfo is None:
+                    phase_open = phase_open.replace(tzinfo=now.tzinfo)
+                if s_ts > now:
+                    bad = f"in the future ({started})"
+                elif phase_open is not None and s_ts < phase_open:
+                    bad = (f"before phase_enter {a.phase} "
+                           f"({facts['enter_ts'].get(a.phase)})")
+            if bad:
+                if not a.force:
+                    raise CCLogError(
+                        f"refusing to log agent_dispatch: detail.started_at "
+                        f"is implausible — {bad}. started_at is a BACKFILL-"
+                        f"ONLY field (declare the real start when logging a "
+                        f"dispatch after inline serial execution); a live "
+                        f"dispatch omits it entirely — the event's own ts is "
+                        f"the start. Run 13 fabricated round stamps on every "
+                        f"dispatch and the report printed a 261x parallelism. "
+                        f"Drop the field, or give the true start time. If the "
+                        f"bypass is intentional, re-run with --force.")
+                violations.append({
+                    "rule": "agent_dispatch started_at must fall within "
+                            "[phase_enter, dispatch ts]",
+                    "actual": f"started_at={started} ({bad})"})
+        elif a.phase == "P4":
+            # Distinguish the two legal shapes in the record: live dispatch
+            # (no started_at) vs backfill (declared). Nothing is rejected —
+            # this only labels the pair for the report's * marker.
+            detail.setdefault("dispatch_kind", "live")
 
     # --- run_aborted: the honest way to kill a false start ----------------
     # Run 10's cache-key pre-item was a false start: init → P0 → scope error
@@ -1589,6 +1666,28 @@ def cmd_event(a):
                 st.pop("g5_delta_scopes", None)
             seq += 1
 
+    # --- mid-review fix counts as a gate iteration -------------------------
+    # Run 13's G5 reviewer found a defect, the orchestrator fixed it with a
+    # scoped P4 re-entry WHILE G5 was still open, and the review continued to
+    # PASS — efficient, legal, and completely invisible to the loop counter
+    # (gate5_iterations read 0). A mid-review fix IS a rework round the gate
+    # surfaced; cross-run tuning that reads the counter would under-count the
+    # gate's interception cost. Auto-increment when P4 re-enters while G5 is
+    # open, and say why in the record.
+    if (a.event == "phase_enter" and a.phase == "P4"
+            and facts["enters"].get("G5", 0) > facts["exits"].get("G5", 0)
+            and (st.get("gate_verdicts") or {}).get("g5")
+            not in GATE_PASSING["g5"]):
+        loops = st.setdefault("loops", {"gate3_iterations": 0,
+                                        "gate5_iterations": 0})
+        loops["gate5_iterations"] = loops.get("gate5_iterations", 0) + 1
+        _append_jsonl(run_dir, _event_rec(
+            st.get("run_id"), seq, a.phase, "loop_increment",
+            {"gate": "g5", "gate5_iterations": loops["gate5_iterations"],
+             "reason": "P4 re-entered while G5 open — mid-review fix counts "
+                       "as a gate iteration"}))
+        seq += 1
+
     # --- downstream phases retract ----------------------------------------
     # Voiding the gate verdict was not enough: run 3 re-entered P4 twice after P6
     # had already closed, and `completed_phases` still listed P6 from the first
@@ -1750,7 +1849,13 @@ def cmd_report(a):
     wall_ms = int((t1 - t0).total_seconds() * 1000) if (t0 and t1) else None
 
     # --- per-phase: recorded (pause-corrected) vs raw (enter→exit timestamps)
+    # Accumulated across segments: a phase re-entered after corrective work has
+    # multiple enter→exit spans, and dict-overwrite kept only the LAST one —
+    # run 13's P4 showed 10m (the mid-review fix segment) while its main
+    # 22.8m segment silently vanished. phase_nsegs records how many segments
+    # each phase ran so the report can show "(2 段)" next to re-entered phases.
     phase_rec, phase_raw, enter_ts, exit_ts = {}, {}, {}, {}
+    phase_nsegs = {}
     for e in events:
         ph, ev = e.get("phase"), e.get("event")
         if ev == "phase_enter":
@@ -1758,10 +1863,12 @@ def cmd_report(a):
         elif ev == "phase_exit":
             exit_ts[ph] = e.get("ts")
             if e.get("duration_ms") is not None:
-                phase_rec[ph] = e["duration_ms"]
+                phase_rec[ph] = phase_rec.get(ph, 0) + e["duration_ms"]
             s, x = _parse_ts(enter_ts.get(ph)), _parse_ts(e.get("ts"))
             if s and x:
-                phase_raw[ph] = int((x - s).total_seconds() * 1000)
+                seg = int((x - s).total_seconds() * 1000)
+                phase_raw[ph] = phase_raw.get(ph, 0) + seg
+                phase_nsegs[ph] = phase_nsegs.get(ph, 0) + 1
 
     # --- per-component: same two views, from dispatch to done --------------
     # started_at (backfill after inline serial execution) is the effective
@@ -1816,9 +1923,28 @@ def cmd_report(a):
 
     # --- parallelism from RAW values: recorded durations can carry accounting
     # bugs (run 5's T4 recorded 0m against a raw 37.8m); timestamps cannot.
+    # manifest is loaded here (before the git section) because the
+    # physical-limit check reads config.max_parallel.
+    manifest = {}
+    mp = os.path.join(run_dir, "manifest.json")
+    if os.path.exists(mp):
+        try:
+            manifest = json.load(open(mp, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
     comp_raw_sum = sum(r.get("raw") or 0 for r in comp.values())
-    p4_raw = phase_raw.get("P4")
+    # Sum across ALL P4 segments (re-entries included): run 13's P4 had two
+    # segments (main + mid-review fix) and the last one overwrote the first,
+    # showing 10m instead of 33m.
+    p4_raw = sum(v for k, v in phase_raw.items() if k == "P4")
     parallel = (comp_raw_sum / p4_raw) if (p4_raw and comp_raw_sum) else None
+    # A ratio above max_parallel is physically impossible: N components can
+    # at most overlap N-way. Run 13 printed 261.86x because every dispatch
+    # carried a fabricated started_at — the ledger itself was the bug, and
+    # the report should say so instead of laundering the number.
+    max_par = (manifest.get("config") or {}).get("max_parallel", 4) \
+        if isinstance(manifest, dict) and manifest else 4
+    impossible = parallel is not None and parallel > max_par * 1.05
 
     # Planned waves (from the P4 enter detail) vs actual overlap (from
     # dispatch/done timestamp spans): a ratio of exactly 1.00x with a planned
@@ -1913,13 +2039,7 @@ def cmd_report(a):
         return ""
 
     # --- git change list, diffed against the run's baseline commit
-    manifest = {}
-    mp = os.path.join(run_dir, "manifest.json")
-    if os.path.exists(mp):
-        try:
-            manifest = json.load(open(mp, encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            manifest = {}
+    # (manifest loaded earlier, before the parallelism check)
     baseline = manifest.get("baseline_commit")
     ref = baseline or "HEAD"
     shortstat = _git_out(a.root, "diff", "--shortstat", ref)
@@ -1973,8 +2093,14 @@ def cmd_report(a):
         wave_desc = (f"（计划最大 wave {planned_wave} 组件 / 实际重叠 "
                      f"{actual_overlap} 对）"
                      if planned_wave is not None else "")
-        L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x "
-                 f"{wave_desc} |")
+        if impossible:
+            L.append(f"| ⚠ P4 并行度 | **{parallel:.2f}x — IMPOSSIBLE**（超过 "
+                     f"max_parallel={max_par}：N 个组件最多重叠 N 路，账本被 "
+                     f"污染——查 dispatch 的 started_at 是否为编造时间戳，"
+                     f"run 13 曾以此打出 261.86x）{wave_desc} |")
+        else:
+            L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x "
+                     f"{wave_desc} |")
     if parallel_active:
         L.append(f"| P4 并行度（活跃口径，剔除疑似挂起段） | "
                  f"{parallel_active:.2f}x |")
@@ -1987,7 +2113,9 @@ def cmd_report(a):
     L.append("|---|---|---|")
     for ph in ["P0", "P1", "P2", "G3", "P4", "G5", "P6"]:
         if ph in phase_rec or ph in phase_raw:
-            L.append(f"| {ph} | {_fmt_dur(phase_rec.get(ph))}"
+            nsegs = phase_nsegs.get(ph, 0)
+            seg_note = f"（{nsegs} 段累计）" if nsegs > 1 else ""
+            L.append(f"| {ph}{seg_note} | {_fmt_dur(phase_rec.get(ph))}"
                      f"{_flag(phase_rec.get(ph), phase_raw.get(ph))}"
                      f" | {_fmt_dur(phase_raw.get(ph))} |")
     L.append("")

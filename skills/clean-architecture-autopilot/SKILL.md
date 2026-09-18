@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.15.0 -->
+<!-- clean-architecture system v1.16.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -252,6 +252,14 @@ per-dispatch context injection outweighs the overlap saved. Decide per run:
   logged dispatch+done in the same second and recorded 0.5–0.9s against real
   minutes — a 600x ledger error. The pairing timer and the report's raw column
   both use `started_at` when present; the report marks such components `*`.
+  **`started_at` is BACKFILL-ONLY (v1.16.0)**: a live dispatch — logged when
+  the work actually begins — omits it entirely, and its value must fall within
+  `[phase_enter of this phase, the dispatch's own ts]` or the event is refused.
+  Run 13 attached one to every LIVE dispatch with synthetic round stamps
+  (00:00, 00:10, 00:20…) and the report printed a physically impossible
+  261.86x parallelism; a field's presence is never its truth. Dispatches are
+  also only loggable while their phase is OPEN (log before `phase_exit`) —
+  run 13 wrote P1's pair after the phase had closed.
 
 Every dispatch names its agent (`--agent ca-clean-implementer`, or
 `orchestrator` for the orchestrator's own work) and, in P4, its injected skills
