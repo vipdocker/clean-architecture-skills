@@ -72,13 +72,13 @@ echo -e "  Skills:  ${#SKILLS[@]} (${SKILLS[*]})"
 
 # The orchestrator's scripts are the mechanical authority (cc_log.py gates);
 # shipping without them produces a broken pipeline.
-for py in cc_log.py dep_graph.py design_coverage.py plan_graph.py; do
+for py in cc_log.py dep_graph.py design_coverage.py plan_graph.py design_trace.py; do
   if [ ! -f "$SKILL_SRC/clean-architecture-autopilot/scripts/$py" ]; then
     echo -e "  ${RED}Error: clean-architecture-autopilot/scripts/$py missing.${NC}"
     exit 1
   fi
 done
-echo -e "  Orchestrator scripts: ${GREEN}4/4${NC}"
+echo -e "  Orchestrator scripts: ${GREEN}5/5${NC}"
 
 # Version consistency: every skill comment and agent frontmatter must carry
 # the same version. Refusing drifted files prevents the stale-copy failure
@@ -171,7 +171,7 @@ done
 
 # Verify the load-bearing scripts landed
 for root in "$HOME/.agents/skills"; do
-  for py in cc_log.py dep_graph.py design_coverage.py plan_graph.py; do
+  for py in cc_log.py dep_graph.py design_coverage.py plan_graph.py design_trace.py; do
     if [ ! -f "$root/clean-architecture-autopilot/scripts/$py" ]; then
       echo -e "  ${RED}Error: $root/clean-architecture-autopilot/scripts/$py missing after copy.${NC}"
       ERRORS=$((ERRORS + 1))

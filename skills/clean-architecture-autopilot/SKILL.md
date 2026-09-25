@@ -2,7 +2,7 @@
 name: clean-architecture-autopilot
 description: Orchestrator skill that drives the full Clean Architecture pipeline from requirement to accepted code. Manages a 5-phase state machine, dispatches the five role agents, injects the right methodology skill per phase, runs two quality gates (Dependency Rule audit + full architecture review), routes REVISE/FAIL verdicts with bounded feedback loops, and augments each phase with matching "superpowers" skills/agents. Use when the user wants an end-to-end, gated Clean-Architecture-driven build rather than running each agent by hand. Not for applying a single methodology skill in isolation (use that skill directly), for retrospectively tuning a finished run (use ca-process-tuning), or for reviewing code without building it (use ca-architecture-review-checklist).
 ---
-<!-- clean-architecture system v1.16.0 -->
+<!-- clean-architecture system v1.17.0 -->
 
 # Clean Architecture Autopilot (Orchestrator)
 
@@ -182,6 +182,23 @@ Transition rules:
 
 For each phase: which role agent to dispatch, which local methodology skill to
 inject, and which **superpowers** skill(s)/agent(s) augment it.
+
+### v1.17 evidence ownership by role
+
+- **Architecture Designer (P2):** declares every `component_map.ownership` record
+  and records a `design_amendment` before P4 writes files outside its planned task
+  set.
+- **Dependency Auditor (G3):** writes the `dep_graph.py --component-map` component
+  graph evidence, including component edges, SCCs, unowned modules, and ownership
+  errors (or a specific degradation reason).
+- **Clean Implementer (P4):** pairs `work_started`/`work_finished` for each worker
+  activity and records every claimed verifier with `verification_recorded`.
+- **Architecture Reviewer (G5):** consumes `design_trace.py` and verification
+  records before certifying a passing result. It may use `debt_signoff_reused` only
+  when the debt list is unchanged from the referenced user-approved chain.
+- **Requirements Analyst (P1):** records every self-resolved information decision
+  through `adopted_without_asking`, including the source `basis`; it never invents
+  a basis merely to avoid a user question.
 
 ### Superpowers availability rule (applies to every phase below)
 
@@ -766,14 +783,86 @@ Naming rules for `<task-slug>`:
 ```
 { "ts":"ISO-8601", "run_id":"...", "seq":N, "phase":"P2|G3|...",
   "event":"phase_enter|phase_exit|phase_reopened|component_done|agent_dispatch|
-           skill_inject|superpower_used|superpower_unavailable|gate_verdict|
-           gate_invalidated|gate_scope_narrowed|loop_increment|user_loop|
-           debt_signoff|pause|conflict_logged|process_violation|
-           artifact_written|run_aborted|error",
+           work_started|work_finished|design_amendment|verification_recorded|
+           baseline_accept|debt_signoff_reused|skill_inject|superpower_used|
+           superpower_unavailable|gate_verdict|gate_invalidated|gate_scope_narrowed|
+           loop_increment|user_loop|debt_signoff|pause|conflict_logged|
+           process_violation|artifact_written|run_aborted|error",
   "agent":"...", "skills":[...], "superpowers":[...],
   "verdict":"APPROVED|REVISE_REQUIRED|PASS|PASS_WITH_CONCERNS|FAIL|null",
   "detail":{...}, "duration_ms":N }
 ```
+
+### v1.17.0 evidence-integrity protocol
+
+The following six append-only events are evidence contracts. Log them through
+`cc_log.py event`; never reconstruct them from a prose report. Their JSON below is
+exactly the required `detail` shape (the enclosing event also has `event` and
+`phase`).
+
+**P4 work lifecycle.** A P4 `work_started` and its `work_finished` must use the
+same `activity_id`, `component`, `logical_wave_id`, and `execution_batch_id`.
+`logical_wave_id` is the plan wave; `execution_batch_id` is the actual
+`max_parallel` batch. G3/G5 lifecycle events use only `activity_id`.
+
+```json
+{"event":"work_started","phase":"P4","detail":{"activity_id":"T-orders","component":"orders","logical_wave_id":"wave-1","execution_batch_id":"wave-1-batch-1"}}
+{"event":"work_finished","phase":"P4","detail":{"activity_id":"T-orders","component":"orders","logical_wave_id":"wave-1","execution_batch_id":"wave-1-batch-1"}}
+```
+
+**Design amendments.** Before a P4 artifact records actual files that differ from
+P2 `dag_tasks[].files_touched`, record the amendment with non-empty planned and
+actual file lists. `design_trace.py` treats this as the sole approval for the
+mismatch.
+
+```json
+{"event":"design_amendment","phase":"P4","detail":{"task_id":"T-orders","planned_files":["orders/service.py"],"actual_files":["orders/place_order.py"],"reason":"The approved task naming was refined at the domain boundary."}}
+```
+
+**Verification evidence.** Every claimed verifier records its raw-output artifact
+and the actual counts. A PASS record with warnings needs one reasoned accepted
+warning per warning; only error=warning=info=0 permits prose saying "zero
+warnings".
+
+```json
+{"event":"verification_recorded","phase":"P4","detail":{"tool":"ruff","status":"PASS_WITH_ACCEPTED_WARNINGS","artifact":"artifacts/ruff.json","counts":{"error":0,"warning":1,"info":0},"accepted_warnings":[{"rule":"E501","path":"orders/place_order.py","reason":"The retained external-contract example is intentionally verbatim."}]}}
+```
+
+**Debt sign-off reuse.** `debt_signoff_reused` is legal only when the current debt
+list is byte-for-byte the prior signed-off list and its referenced G5 verdict,
+user-loop, sign-off sequence, and user answer form a valid non-forced chain. It
+is for unchanged debt only: it neither asks again nor creates another sign-off.
+
+```json
+{"event":"debt_signoff_reused","phase":"G5","detail":{"debts":["G5-12"],"user_loop_seq":41,"debt_signoff_seq":42,"answer":"I accept G5-12 as unchanged debt."}}
+```
+
+**Initial baseline acceptance.** Only a path and SHA-256 captured by `init` may
+be accepted, and the file must still match that hash. It remains pre-existing
+input, never a run-created change.
+
+```json
+{"event":"baseline_accept","phase":"P0","detail":{"path":"docs/input.md","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","purpose":"User-provided design input","commit_allowed":true}}
+```
+
+**P2 component ownership.** `component_map.ownership` is explicit graph evidence,
+not a prefix heuristic. Each record has exactly `module`, `component`, and `kind`;
+`kind` is one of `domain`, `adapter`, `shared_adapter`, or `framework`. A shared
+implementation is its own `shared_adapter` component.
+
+```json
+{"component_map":{"ownership":[{"module":"orders.domain","component":"orders.domain","kind":"domain"},{"module":"orders.http","component":"orders.http","kind":"adapter"},{"module":"shared.clock","component":"shared.clock","kind":"shared_adapter"},{"module":"app.main","component":"app.composition","kind":"framework"}]}}
+```
+
+**Requirements self-resolution.** Whenever an information gap is resolved without
+asking, the Requirements Analyst emits `adopted_without_asking` with the decision
+text and a source basis; `cc_log.py` derives `question_ledger.self_resolved` from
+these records.
+
+```json
+{"event":"phase_exit","phase":"P1","detail":{"adopted_without_asking":{"OQ-3":{"basis":"P0 codebase notes: existing order-id normalization contract"}}}}
+```
+
 Rules:
 - Emit `phase_enter`/`phase_exit` around every phase; `gate_verdict` at each gate;
   `loop_increment` whenever `gate3/5_iterations` rises; `user_loop` on every pause;

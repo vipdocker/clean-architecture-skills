@@ -1,10 +1,12 @@
 # Clean Architecture Skill & Agent System
 
-**System version: 1.16.0** ｜ 所有 skill 与 agent 版本统一为 `1.16.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
+**System version: 1.17.0** ｜ 所有 skill 与 agent 版本统一为 `1.17.0`（skill 记于 `SKILL.md` 正文首行注释，agent 记于 frontmatter `version` 字段）
 
 一套基于 Robert C. Martin《Clean Architecture（架构整洁之道）》理论构建的、**语言无关**的多 Agent 开发流水线。它把书里的核心方法论——依赖规则、SOLID、组件内聚/耦合、分层与边界——拆成 **8 个 Skill（1 总控编排器 + 6 方法论 + 1 流程调优）** 和 **5 个职责单一的 Agent**，再用一条带质量门的流水线把它们串起来：**需求 → 分层设计 → 依赖规则审计 → 整洁实现 → 架构评审**。
 
 > 本目录中的所有文件都是**定义 + 文档**，同时提供安装脚本：`bash install.sh` 一键把 8 个 Skill 与 5 个 Agent 部署到本机 agent 运行环境（详见「方式 C」），`bash uninstall.sh` 一键移除。
+
+**v1.17.0 证据完整性**：P2 组件归属、P4 实际文件与生命周期、验证原始输出、初始脏基线及未变技术债复用都写入可审计事件；`design_trace.py` 阻止设计漂移以正常 G5 通过结案。
 
 ---
 
@@ -195,7 +197,7 @@ bash uninstall.sh    # 反安装（只移除本项目的文件，不动其他 sk
 
 **Skill 不装 `~/.qoder/skills`**：Qoder 同时读 `~/.qoder/skills` 与 `~/.agents/skills`，两处都装会让 skill 列表重复；旧版脚本装到那里的残留会被 install.sh 顺带清除（应用侧迁移已把它们改名留在 `~/.qoder/skills-bk`，脚本不动那个备份）。**Agent 不平铺在 agents 根目录**：统一放按项目命名的子目录 `clean-architecture-autopilot/`（Qoder 2026-09 起的包式布局，平铺 .md 会被应用搬进子目录；qoderwork 侧同样采用），旧平铺残留由 install.sh 清除。
 
-`install.sh` 自带三道预检：每个 skill 必有 `SKILL.md`、总控的 4 个机械脚本（`cc_log.py` 等）必须在场、**全仓版本号必须一致**（skill 首行注释与 agent frontmatter 对齐，不一致拒绝安装——防止把漂移版本部署出去）。同步用 `rsync --delete`，仓库里删掉的文件安装时也会删掉，`__pycache__`/`.DS_Store` 不安装；重复执行幂等。**仓库每次更新后重跑一次 `bash install.sh`** 即可保持各位置一致（历史上 run4 就因安装副本停在 v1.3.0 而踩坑）。
+`install.sh` 自带三道预检：每个 skill 必有 `SKILL.md`、总控的 5 个机械脚本（含 `design_trace.py`）必须在场、**全仓版本号必须一致**（skill 首行注释与 agent frontmatter 对齐，不一致拒绝安装——防止把漂移版本部署出去）。同步用 `rsync --delete`，仓库里删掉的文件安装时也会删掉，`__pycache__`/`.DS_Store` 不安装；重复执行幂等。**仓库每次更新后重跑一次 `bash install.sh`** 即可保持各位置一致（历史上 run4 就因安装副本停在 v1.3.0 而踩坑）。
 
 若要迁移到其它 agent 运行环境：把 `skills/` 下每个目录（含 `SKILL.md`）拷到你的 agent skill 目录，把 `agents/` 映射为子 agent 定义，再按 `pipeline/orchestration.md` 的 DAG 编排即可。当前所有 SKILL.md 的 frontmatter 严格只含 `name` / `description` 两个字段（符合 Anthropic Skill 编写规范），版本号以注释形式记在正文首行而不占 frontmatter；每个 `description` 均含正向触发词与负向排除（`Not for …`），用于拉开相邻 skill 之间的触发边界。
 

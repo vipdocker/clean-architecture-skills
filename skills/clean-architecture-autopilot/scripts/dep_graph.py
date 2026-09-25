@@ -30,8 +30,13 @@ Usage:
   python3 dep_graph.py --root <project_dir> --scan-dirs modules \
       --root-files app.py,main.py,web_server.py
 
+  # include P2 component ownership and component-level cycles
+  python3 dep_graph.py --root <project_dir> --scan-dirs modules \
+      --component-map artifacts/p2-design.json --json graph.json
+
 Exit codes: 0 = scanned, no cycles touching --focus (or no --focus given and
-no cycles at all); 1 = cycles found in scope; 2 = usage/IO error.
+no cycles at all); 1 = cycles found in scope or an invalid component map;
+2 = usage/IO error.
 Layer judgement (which direction is "inward") stays with the auditor — this
 tool reports edges and cycles, it does not know your layer map.
 """
@@ -39,6 +44,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import keyword
 import os
 import sys
 from collections import defaultdict
@@ -133,8 +139,10 @@ def tarjan_scc(graph):
         if start in index_of:
             continue
         work = [(start, iter(sorted(graph[start])))]
-        index_of[start] = low[start] = counter[0]; counter[0] += 1
-        stack.append(start); on_stack.add(start)
+        index_of[start] = low[start] = counter[0]
+        counter[0] += 1
+        stack.append(start)
+        on_stack.add(start)
         while work:
             node, it = work[-1]
             advanced = False
@@ -142,8 +150,10 @@ def tarjan_scc(graph):
                 if nxt not in graph:
                     continue
                 if nxt not in index_of:
-                    index_of[nxt] = low[nxt] = counter[0]; counter[0] += 1
-                    stack.append(nxt); on_stack.add(nxt)
+                    index_of[nxt] = low[nxt] = counter[0]
+                    counter[0] += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
                     work.append((nxt, iter(sorted(graph[nxt]))))
                     advanced = True
                     break
@@ -158,12 +168,171 @@ def tarjan_scc(graph):
             if low[node] == index_of[node]:
                 comp = []
                 while True:
-                    w = stack.pop(); on_stack.discard(w); comp.append(w)
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    comp.append(w)
                     if w == node:
                         break
                 if len(comp) > 1:
                     sccs.append(sorted(comp))
     return sorted(sccs, key=len, reverse=True)
+
+
+_COMPONENT_KINDS = {"domain", "adapter", "shared_adapter", "framework"}
+
+
+def is_canonical_dotted_identifier(value):
+    """Return whether ``value`` is an unambiguous Python-style dotted name."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and not value.endswith(".py")
+        and all(part.isidentifier() and not keyword.iskeyword(part) for part in value.split("."))
+    )
+
+
+def load_component_ownership(path):
+    """Read P2 ``component_map.ownership`` as module-to-component records.
+
+    Returns ``(mapping, errors)``. A missing ownership list is compatible with
+    pre-component-map P2 artifacts and returns an empty mapping. Invalid records
+    are reported instead of being repaired or inferred.
+    """
+    with open(path, encoding="utf-8") as fh:
+        artifact = json.load(fh)
+
+    errors = []
+    if not isinstance(artifact, dict):
+        return {}, [{"message": "P2 artifact must be a JSON object"}]
+    component_map = artifact.get("component_map", {})
+    if not isinstance(component_map, dict):
+        return {}, [{"message": "component_map must be a JSON object"}]
+    records = component_map.get("ownership", [])
+    if records is None:
+        records = []
+    if not isinstance(records, list):
+        return {}, [{"message": "component_map.ownership must be a list"}]
+
+    mapping = {}
+    expected_keys = {"module", "component", "kind"}
+    for index, record in enumerate(records):
+        prefix = f"ownership record {index}"
+        if not isinstance(record, dict) or set(record) != expected_keys:
+            errors.append({
+                "message": f"{prefix} must contain exactly module, component, and kind",
+            })
+            continue
+        module = record["module"]
+        component = record["component"]
+        kind = record["kind"]
+        if not isinstance(module, str) or not module.strip():
+            errors.append({"message": f"{prefix} module must be a non-empty string"})
+            continue
+        if not is_canonical_dotted_identifier(module):
+            errors.append({
+                "message": f"{prefix} module must be a canonical dotted identifier: {module!r}",
+            })
+            continue
+        if not isinstance(component, str) or not component.strip():
+            errors.append({"message": f"{prefix} component must be a non-empty string"})
+            continue
+        if not is_canonical_dotted_identifier(component):
+            errors.append({
+                "message": f"{prefix} component must be a canonical dotted identifier: {component!r}",
+            })
+            continue
+        if kind not in _COMPONENT_KINDS:
+            errors.append({
+                "message": f"{prefix} for module {module!r} has invalid kind: {kind!r}",
+            })
+            continue
+        if module in mapping:
+            errors.append({
+                "message": f"{prefix} has duplicate module ownership: {module!r}",
+            })
+            continue
+        mapping[module] = {"component": component, "kind": kind}
+    return mapping, errors
+
+
+def component_graph(module_graph, ownership):
+    """Project module dependencies into explicit component dependencies.
+
+    ``ownership`` is normally the ``(mapping, errors)`` tuple from
+    :func:`load_component_ownership`; a mapping or an empty list is also
+    accepted for direct callers. ``shared_adapter`` records remain ordinary
+    named components and receive no implicit owner.
+    """
+    ownership_errors = []
+    if isinstance(ownership, tuple) and len(ownership) == 2:
+        module_ownership, ownership_errors = ownership
+    elif isinstance(ownership, dict):
+        module_ownership = ownership
+    elif isinstance(ownership, list) and not ownership:
+        module_ownership = {}
+    else:
+        module_ownership = {}
+        ownership_errors.append({
+            "message": "ownership must be a mapping or (mapping, errors)"
+        })
+
+    raw_ownership_errors = (
+        ownership_errors if isinstance(ownership_errors, list) else [ownership_errors]
+    )
+    ownership_errors = []
+    for error in raw_ownership_errors:
+        message = error.get("message") if isinstance(error, dict) else None
+        ownership_errors.append(
+            {"message": message}
+            if isinstance(message, str) and message.strip()
+            else {"message": f"invalid ownership error record: {error!r}"}
+        )
+
+    if not isinstance(module_ownership, dict):
+        ownership_errors.append({"message": "ownership mapping must be a dictionary"})
+        module_ownership = {}
+
+    components_by_module = {}
+    for module, record in module_ownership.items():
+        if isinstance(record, dict) and isinstance(record.get("component"), str):
+            components_by_module[module] = record["component"]
+        else:
+            ownership_errors.append({
+                "message": f"ownership mapping record for {module!r} must include a component string",
+            })
+
+    modules = set(module_graph)
+    modules.update(target for targets in module_graph.values() for target in targets)
+    for module in sorted(components_by_module):
+        if module not in modules:
+            ownership_errors.append({
+                "message": f"ownership module {module!r} is not in the scanned module graph",
+            })
+    unowned_modules = sorted(module for module in modules if module not in components_by_module)
+
+    graph = {component: set() for component in components_by_module.values()}
+    edges = set()
+    for source, targets in module_graph.items():
+        source_component = components_by_module.get(source)
+        if source_component is None:
+            continue
+        for target in targets:
+            target_component = components_by_module.get(target)
+            if target_component is None or target_component == source_component:
+                continue
+            graph[source_component].add(target_component)
+            edges.add((source_component, target_component))
+
+    component_sccs = tarjan_scc(graph)
+    return {
+        "component_edges": [
+            {"from": source, "to": target} for source, target in sorted(edges)
+        ],
+        "component_sccs": component_sccs,
+        "unowned_modules": unowned_modules,
+        "ownership_errors": ownership_errors,
+    }
 
 
 def main():
@@ -175,6 +344,8 @@ def main():
                    help="comma-separated root-level .py files (composition roots)")
     p.add_argument("--focus", default=None,
                    help="module-name prefix to report edges/cycles for")
+    p.add_argument("--component-map", default=None,
+                   help="P2 artifact containing component_map.ownership")
     p.add_argument("--json", dest="json_out", default=None,
                    help="write full result JSON to this path")
     a = p.parse_args()
@@ -208,6 +379,16 @@ def main():
         "focus": focus, "focus_outward_edges": focus_out,
         "focus_sccs": [{"size": len(c), "members": c} for c in focus_sccs],
     }
+    if a.component_map is not None:
+        try:
+            ownership = load_component_ownership(a.component_map)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            print(
+                f"dep_graph: ERROR cannot read --component-map {a.component_map}: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        result["component_graph"] = component_graph(graph, ownership)
     if a.json_out:
         try:
             with open(a.json_out, "w", encoding="utf-8") as f:
@@ -219,6 +400,14 @@ def main():
     print(f"modules={result['modules']} edges={result['edges']} "
           f"sccs(>1)={len(sccs)} inline_imports={len(inline)} "
           f"parse_errors={len(parse_errors)}")
+    if "component_graph" in result:
+        component_result = result["component_graph"]
+        print(
+            f"component_edges={len(component_result['component_edges'])} "
+            f"component_sccs(>1)={len(component_result['component_sccs'])} "
+            f"unowned_modules={len(component_result['unowned_modules'])} "
+            f"ownership_errors={len(component_result['ownership_errors'])}"
+        )
     for c in sccs[:5]:
         print(f"  SCC size={len(c)}: {', '.join(c[:6])}{' ...' if len(c) > 6 else ''}")
     if focus:
@@ -227,7 +416,14 @@ def main():
         for e in focus_out[:20]:
             print(f"  OUT {e['from']} -> {e['to']}")
     bad = focus_sccs if focus else sccs
-    sys.exit(1 if bad else 0)
+    component_bad = False
+    if "component_graph" in result:
+        component_result = result["component_graph"]
+        component_bad = any(
+            component_result[key]
+            for key in ("ownership_errors", "unowned_modules", "component_sccs")
+        )
+    sys.exit(1 if bad or component_bad else 0)
 
 
 if __name__ == "__main__":

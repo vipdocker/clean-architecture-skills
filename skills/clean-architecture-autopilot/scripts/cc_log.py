@@ -72,7 +72,16 @@ Notes:
   records the resolved path in manifest.json.resolved_root.
 - Secrets: this script writes exactly what you pass; do not pass tokens/keys.
 """
-import argparse, json, os, subprocess, sys, tempfile, time, datetime, re
+import argparse
+import datetime
+import hashlib
+import design_trace
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
 
 
 class CCLogError(Exception):
@@ -241,6 +250,116 @@ def _git_out(root, *args):
         return None
 
 
+def _git_numstat_paths(root, ref):
+    """Return ``{current_path: (added, deleted)}`` from NUL-delimited numstat.
+
+    With ``-z``, ordinary records are ``added<TAB>deleted<TAB>path<NUL>``.
+    Rename and copy records have an empty path in that first record, followed by
+    ``old-path<NUL>new-path<NUL>``. Decode only complete NUL records so path
+    whitespace, Unicode, and embedded tabs are never parsed as delimiters.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", root, "diff", "--numstat", "-z",
+                "--find-renames", "--find-copies", "--find-copies-harder", ref,
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+
+    records = result.stdout.split(b"\0")
+    plus_del = {}
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        fields = record.split(b"\t", 2)
+        if len(fields) != 3:
+            continue
+        added, deleted, path = fields
+        if path:
+            current_path = path
+        else:
+            if index + 1 >= len(records):
+                break
+            old_path, current_path = records[index:index + 2]
+            index += 2
+            if not old_path or not current_path:
+                continue
+        plus_del[os.fsdecode(current_path)] = (
+            os.fsdecode(added), os.fsdecode(deleted)
+        )
+    return plus_del
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_porcelain_v1_paths(root):
+    """Return ``(status, current_path)`` records from NUL-delimited porcelain v1.
+
+    Porcelain v1 writes a rename or copy as ``XY new-path NUL old-path NUL``;
+    only the first path is in the current worktree. NUL framing preserves spaces,
+    Unicode, and paths Git would otherwise quote in line-oriented output.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "status", "--porcelain=v1", "-z",
+             "--untracked-files=all"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+
+    records = result.stdout.split(b"\0")
+    paths = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 3 or record[2:3] != b" ":
+            continue
+        status = record[:2].decode("ascii", errors="replace")
+        paths.append((status, os.fsdecode(record[3:])))
+        if (b"R" in record[:2] or b"C" in record[:2]) and index < len(records):
+            index += 1
+    return paths
+
+
+def _preexisting_files(root, dirty_paths):
+    """Capture init-time dirty file provenance, excluding cc-log's own output."""
+    records = []
+    observed_at = now_iso()
+    for status, path in dirty_paths:
+        if path.startswith(".cc-skill"):
+            continue
+        candidate = os.path.join(root, path)
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            digest = _sha256_file(candidate)
+        except OSError:
+            continue
+        records.append({"path": path, "status": status, "sha256": digest,
+                        "observed_at": observed_at})
+    return records
+
+
 def cmd_init(a):
     slug = a.slug or slugify(a.title)
     run_dir = resolve_dir(a.root, slug)
@@ -257,15 +376,16 @@ def cmd_init(a):
     # 18 uncommitted files and its report claimed all 26 new files as its own
     # (one of them was even run 11's design doc). Count it so the report can
     # warn instead of letting attribution drift silently.
-    dirty_status = _git_out(a.root, "status", "--porcelain") or ""
-    dirty_at_init = [l[3:] for l in dirty_status.splitlines()
-                     if l and not l[3:].startswith(".cc-skill")]
+    dirty_paths = _git_porcelain_v1_paths(a.root) or []
+    preexisting_files = _preexisting_files(a.root, dirty_paths)
+    dirty_at_init = [record["path"] for record in preexisting_files]
     manifest = {
         "run_id": run_id, "task_title": a.title or slug, "slug": slug,
         "start": now_iso(), "end": None, "resolved_root": os.path.abspath(run_dir),
         "baseline_commit": baseline,
         "dirty_at_init": len(dirty_at_init),
         "dirty_at_init_sample": dirty_at_init[:5],
+        "preexisting_files": preexisting_files,
         "config": {"max_parallel": a.max_parallel},
     }
     atomic_write(os.path.join(run_dir, "manifest.json"),
@@ -277,7 +397,10 @@ def cmd_init(a):
         "loops": {"gate3_iterations": 0, "gate5_iterations": 0},
         "artifact_pointers": {}, "p4_components": [],
         "pending_user_question": None, "open_questions": [], "debts": [],
-        "question_ledger": {"asked": 0, "self_resolved": 0},
+        "activity_lifecycle": {}, "design_amendments": [],
+        "verification_records": [], "baseline_acceptances": [],
+        "question_ledger": {"asked": 0, "self_resolved": 0,
+                            "self_resolved_records": []},
         "next_action": "run P0/P1", "updated_at": now_iso(),
     }
     atomic_write(os.path.join(run_dir, "state.json"),
@@ -355,14 +478,17 @@ def _scan_log(run_dir):
              "enter_ts": {}, "pause_ms_since_enter": {},
              "dispatch_ts": {}, "pause_ms_since_dispatch": {},
              "dispatch_backfilled": {}, "dispatch_phase": {},
-             "open_components": set(),
+             "open_components": set(), "open_activities": {},
              "last_interaction_ts": None,
-             "user_loop_triggers": set(),
+             "user_loop_triggers": set(), "debt_user_loops": {},
+             "debt_signoffs": {}, "g5_pwc_verdicts": [],
+             "force_formed_event_seqs": set(),
              "latest_debt_user_loop_seq": None,
              "latest_g5_pwc_seq": None}
     p = os.path.join(run_dir, "run.jsonl")
     if not os.path.exists(p):
         return facts
+    force_formed = False
     with open(p, encoding="utf-8") as f:
         for line in f:
             try:
@@ -371,6 +497,12 @@ def _scan_log(run_dir):
                 continue
             ph, ev = r.get("phase"), r.get("event")
             det = r.get("detail") or {}
+            if ev == "process_violation":
+                force_formed = force_formed or det.get("bypass") == "--force"
+                continue
+            if force_formed:
+                facts["force_formed_event_seqs"].add(r.get("seq"))
+                force_formed = False
             if r.get("ts"):
                 facts["last_ts"] = r["ts"]
             if ev == "phase_enter":
@@ -397,18 +529,30 @@ def _scan_log(run_dir):
             elif ev == "component_done":
                 comp = det.get("component") or det.get("task")
                 facts["open_components"].discard(comp)
+            elif ev == "work_started":
+                activity_id = det.get("activity_id")
+                if activity_id:
+                    facts["open_activities"][activity_id] = {
+                        "phase": ph, "detail": det, "seq": r.get("seq"),
+                        "ts": r.get("ts"),
+                    }
+            elif ev == "work_finished":
+                facts["open_activities"].pop(det.get("activity_id"), None)
             elif ev == "user_loop":
                 trig = det.get("trigger")
                 if trig:
                     facts["user_loop_triggers"].add(trig)
                 if trig == "debt_signoff":
                     facts["latest_debt_user_loop_seq"] = r.get("seq")
+                    facts["debt_user_loops"][r.get("seq")] = det
                 facts["last_interaction_ts"] = r.get("ts")
             elif ev == "debt_signoff":
+                facts["debt_signoffs"][r.get("seq")] = det
                 facts["last_interaction_ts"] = r.get("ts")
             elif (ev == "gate_verdict" and ph == "G5"
                   and r.get("verdict") == "PASS_WITH_CONCERNS"):
                 facts["latest_g5_pwc_seq"] = r.get("seq")
+                facts["g5_pwc_verdicts"].append(r)
             elif ev == "pause":
                 facts["last_interaction_ts"] = r.get("ts")
                 gap = det.get("gap_ms") or 0
@@ -473,6 +617,235 @@ def _resolve_path(*candidates):
         if c and os.path.exists(c):
             return c
     return None
+
+
+def _design_trace(run_dir, root, state):
+    """Evaluate the P2/P4/baseline trace that a passing G5 verdict certifies."""
+    artifact = (state.get("artifact_pointers") or {}).get(
+        "p2", "artifacts/p2-design.json"
+    )
+    p2_path = artifact if os.path.isabs(artifact) else os.path.join(run_dir, artifact)
+    try:
+        # Older runs may predate the P2 artifact convention. Preserve their
+        # compatibility as an evidence gap (UNCHECKED), rather than treating a
+        # missing historical artifact as malformed JSON. A present artifact still
+        # goes through the strict parser and any defect remains a hard failure.
+        p2 = design_trace.load_json(p2_path) if os.path.isfile(p2_path) else {}
+        manifest = design_trace._read_manifest(run_dir)
+        events = design_trace._read_events(run_dir)
+        preexisting_paths = {
+            record.get("path") for record in manifest.get("preexisting_files", [])
+            if isinstance(record, dict) and design_trace._canonical_path(record.get("path"))
+        }
+        changes, baseline_errors = design_trace._baseline_changes(
+            root, manifest.get("baseline_commit"), preexisting_paths=preexisting_paths
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise CCLogError(
+            f"refusing to log passing G5 verdict: design trace inputs are invalid ({error})"
+        ) from error
+    return design_trace.check(
+        p2,
+        design_trace.collect_p4_artifacts(run_dir),
+        design_trace.collect_amendments(events),
+        changes,
+        accepted_preexisting_paths=design_trace.collect_accepted_preexisting_paths(
+            manifest, events
+        ),
+        evidence_errors=(
+            design_trace._validate_preexisting_evidence(manifest, events)
+            + baseline_errors
+        ),
+    )
+
+
+_COMPONENT_GRAPH_BLOCKER_CATEGORIES = {
+    "unowned_modules", "ownership_errors", "component_sccs"
+}
+
+
+def _validate_component_graph_subjects(category, subjects, context):
+    """Reject malformed ownership graph records before an APPROVED G3 verdict."""
+    if category == "component_edges":
+        valid = all(
+            isinstance(edge, dict)
+            and _nonempty_string(edge.get("from"))
+            and _nonempty_string(edge.get("to"))
+            for edge in subjects
+        )
+    elif category == "component_sccs":
+        valid = all(
+            isinstance(scc, list)
+            and len(scc) >= 2
+            and all(_nonempty_string(component) for component in scc)
+            for scc in subjects
+        )
+    elif category == "unowned_modules":
+        valid = all(_nonempty_string(module) for module in subjects)
+    elif category == "ownership_errors":
+        # Contract: dep_graph emits ownership failures as exactly
+        # {"message": <non-empty string>}. Reject legacy error/index/module fields
+        # so exceptions compare a single, unambiguous evidence shape.
+        valid = all(
+            isinstance(error, dict)
+            and set(error) == {"message"}
+            and _nonempty_string(error["message"])
+            for error in subjects
+        )
+    else:
+        valid = False
+    if not valid:
+        raise CCLogError(
+            "refusing to log gate_verdict G3: "
+            f"{context}.{category} contains malformed evidence"
+        )
+
+
+def _validate_legacy_exceptions(audit):
+    """Validate exception records even when the graph has no current blockers."""
+    if "legacy_exceptions" not in audit:
+        return
+    exceptions = audit["legacy_exceptions"]
+    if not isinstance(exceptions, list):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: legacy_exceptions must be a list"
+        )
+    for index, exception in enumerate(exceptions):
+        if not isinstance(exception, dict):
+            raise CCLogError(
+                "refusing to log gate_verdict G3: "
+                f"legacy_exceptions[{index}] must be an object"
+            )
+        category = exception.get("category")
+        reason = exception.get("reason")
+        legacy_id = exception.get("legacy_id")
+        subjects = exception.get("subjects")
+        if (
+            category not in _COMPONENT_GRAPH_BLOCKER_CATEGORIES
+            or not _nonempty_string(legacy_id)
+            or not _nonempty_string(reason)
+            or len(reason.strip()) < 20
+            or not isinstance(subjects, list)
+        ):
+            raise CCLogError(
+                "refusing to log gate_verdict G3: "
+                f"legacy_exceptions[{index}] is malformed"
+            )
+        _validate_component_graph_subjects(
+            category, subjects, f"legacy_exceptions[{index}]"
+        )
+
+
+def _legacy_exception_covers(audit, category, subjects):
+    """Allow only a named legacy exception that enumerates every blocker exactly."""
+    expected = {json.dumps(subject, ensure_ascii=False, sort_keys=True) for subject in subjects}
+    for exception in audit.get("legacy_exceptions", []):
+        if exception.get("category") != category:
+            continue
+        listed = exception["subjects"]
+        if {
+            json.dumps(subject, ensure_ascii=False, sort_keys=True)
+            for subject in listed
+        } == expected:
+            return True
+    return False
+
+
+def _validate_component_graph_degradation(reason):
+    """Validate the explicit, auditable fallback for unavailable G3 scanning."""
+    if not isinstance(reason, dict):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph_degraded_reason must be an object"
+        )
+    expected_keys = {"reason", "scan_attempted", "scope"}
+    if set(reason) != expected_keys:
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph_degraded_reason "
+            "must contain exactly reason, scan_attempted, and scope"
+        )
+    if not _nonempty_string(reason.get("reason")):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph_degraded_reason.reason "
+            "must be a non-empty string"
+        )
+    if type(reason.get("scan_attempted")) is not bool:
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph_degraded_reason.scan_attempted "
+            "must be a boolean"
+        )
+    scope = reason.get("scope")
+    if not isinstance(scope, list) or not scope or not all(_nonempty_string(item) for item in scope):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph_degraded_reason.scope "
+            "must be a non-empty list[str]"
+        )
+
+
+def _validate_g3_component_graph(run_dir, state):
+    """Require auditable ownership graph evidence when P2 declares ownership."""
+    artifact = (state.get("artifact_pointers") or {}).get(
+        "p2", "artifacts/p2-design.json"
+    )
+    p2_path = artifact if os.path.isabs(artifact) else os.path.join(run_dir, artifact)
+    try:
+        with open(p2_path, encoding="utf-8") as source:
+            p2 = json.load(source)
+    except (OSError, json.JSONDecodeError) as error:
+        raise CCLogError(
+            f"refusing to log gate_verdict G3: cannot read P2 artifact for component ownership ({error})"
+        ) from error
+    component_map = p2.get("component_map") if isinstance(p2, dict) else None
+    if not isinstance(component_map, dict) or "ownership" not in component_map:
+        return
+
+    audit_path = os.path.join(run_dir, "artifacts", "g3-audit.json")
+    try:
+        with open(audit_path, encoding="utf-8") as source:
+            audit = json.load(source)
+    except (OSError, json.JSONDecodeError) as error:
+        raise CCLogError(
+            f"refusing to log gate_verdict G3: component ownership requires "
+            f"{audit_path} with component_graph evidence ({error})"
+        ) from error
+    graph = audit.get("component_graph") if isinstance(audit, dict) else None
+    degraded_reason = (
+        audit.get("component_graph_degraded_reason") if isinstance(audit, dict) else None
+    )
+    if graph is not None and degraded_reason is not None:
+        raise CCLogError(
+            "refusing to log gate_verdict G3: g3-audit.json must not combine "
+            "component_graph with component_graph_degraded_reason"
+        )
+    if graph is None:
+        _validate_component_graph_degradation(degraded_reason)
+        return degraded_reason
+    required = ("unowned_modules", "component_edges", "component_sccs", "ownership_errors")
+    if not isinstance(graph, dict) or any(key not in graph for key in required):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: declared component_map.ownership "
+            "requires g3-audit.json component_graph with unowned_modules, "
+            "component_edges, component_sccs, and ownership_errors"
+        )
+    if any(not isinstance(graph[key], list) for key in required):
+        raise CCLogError(
+            "refusing to log gate_verdict G3: component_graph evidence fields must be lists"
+        )
+    for category in required:
+        _validate_component_graph_subjects(category, graph[category], "component_graph")
+    _validate_legacy_exceptions(audit)
+
+    blocked = []
+    for category in ("unowned_modules", "ownership_errors", "component_sccs"):
+        subjects = graph[category]
+        if subjects and not _legacy_exception_covers(audit, category, subjects):
+            blocked.append(category)
+    if blocked:
+        raise CCLogError(
+            "refusing to log gate_verdict G3 APPROVED: component_graph has "
+            + ", ".join(blocked)
+            + "; each legacy exception must name a legacy_id, a specific reason, "
+            "and exactly the affected subjects"
+        )
 
 
 def _design_coverage(run_dir, root, design_source, artifact):
@@ -567,6 +940,52 @@ def _questions_of(detail):
     return []
 
 
+def _nonempty_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _adopted_records(adopted, seq):
+    """Return named self-resolutions from current and legacy event shapes.
+
+    Legacy integer and unnamed list values remain readable but cannot manufacture
+    ledger totals because only records with a question and basis are counted.
+    """
+    records = []
+    if isinstance(adopted, dict):
+        for question, value in adopted.items():
+            basis = value.get("basis") if isinstance(value, dict) else value
+            if _nonempty_string(question) and _nonempty_string(basis):
+                records.append({"seq": seq, "question": question, "basis": basis})
+    elif isinstance(adopted, list):
+        for value in adopted:
+            if not isinstance(value, dict):
+                continue
+            question = value.get("question") or value.get("id")
+            basis = value.get("basis")
+            if _nonempty_string(question) and _nonempty_string(basis):
+                records.append({"seq": seq, "question": question, "basis": basis})
+    return records
+
+
+def _validate_adopted_without_asking(adopted):
+    if isinstance(adopted, dict):
+        invalid = [str(question) for question, value in adopted.items()
+                   if not _nonempty_string(question)
+                   or not _nonempty_string(value.get("basis") if isinstance(value, dict)
+                                          else value)]
+    elif isinstance(adopted, list):
+        invalid = [str(index) for index, value in enumerate(adopted)
+                   if isinstance(value, dict) and not (
+                       _nonempty_string(value.get("question") or value.get("id"))
+                       and _nonempty_string(value.get("basis")))]
+    else:
+        invalid = []
+    if invalid:
+        raise CCLogError(
+            "refusing to log adopted_without_asking: every named record requires "
+            f"a non-empty basis (invalid entries: {', '.join(invalid)})")
+
+
 def _derive_next_action(phase, event, verdict, st):
     """Recompute the resume hint. Run 3 ended with next_action still reading
     "run P0/P1" from init, which is exactly the string a post-compression resume
@@ -614,7 +1033,37 @@ def _apply_state_effects(st, phase, event, verdict, detail, seq,
         comps.append(entry)
         return entry
 
-    if event == "agent_dispatch":
+    if event == "work_started":
+        activity_id = detail["activity_id"]
+        lifecycle = st.setdefault("activity_lifecycle", {})
+        lifecycle[activity_id] = {
+            "status": "started", "phase": phase, "start_seq": seq,
+            "component": detail.get("component"),
+            "logical_wave_id": detail.get("logical_wave_id"),
+            "execution_batch_id": detail.get("execution_batch_id"),
+        }
+
+    elif event == "work_finished":
+        activity_id = detail["activity_id"]
+        lifecycle = st.setdefault("activity_lifecycle", {})
+        entry = lifecycle.setdefault(activity_id, {"phase": phase})
+        entry.update({"status": "finished", "finish_seq": seq})
+
+    elif event == "design_amendment":
+        st.setdefault("design_amendments", []).append(detail.copy())
+
+    elif event == "verification_recorded":
+        st.setdefault("verification_records", []).append(detail.copy())
+
+    elif event == "baseline_accept":
+        st.setdefault("baseline_acceptances", []).append(detail.copy())
+
+    elif event == "debt_signoff_reused":
+        st["debts"] = []
+        st["pending_user_question"] = None
+        st["phase_status"] = "in_progress"
+
+    elif event == "agent_dispatch":
         name = detail.get("component") or detail.get("task")
         if name:
             # Opening the entry here means a resume that lands mid-P4 can see what
@@ -641,17 +1090,26 @@ def _apply_state_effects(st, phase, event, verdict, detail, seq,
             # lowercase key to match the documented schema ("p1", "p2", "g3")
             st.setdefault("artifact_pointers", {})[phase.lower()] = path
 
-    elif event == "gate_verdict" and phase == "G5" and verdict == "PASS_WITH_CONCERNS":
-        # The contract is "PASS_WITH_CONCERNS → P6 with logged debts (needs user
-        # sign-off)". Give those debts a machine-readable home so the P6 exit
-        # latch can see them.
-        new = detail.get("debts_awaiting_signoff") or detail.get("debts") or []
-        if isinstance(new, str):
-            new = [new]
-        debts = st.setdefault("debts", [])
-        for d in new:
-            if d not in debts:
-                debts.append(d)
+    elif event == "gate_verdict" and phase == "G3":
+        if "component_graph_degraded_reason" in detail:
+            st["component_graph_degraded_reason"] = detail[
+                "component_graph_degraded_reason"
+            ]
+
+    elif event == "gate_verdict" and phase == "G5":
+        if "design_trace" in detail:
+            st["design_trace"] = detail["design_trace"]
+        if verdict == "PASS_WITH_CONCERNS":
+            # The contract is "PASS_WITH_CONCERNS → P6 with logged debts (needs user
+            # sign-off)". Give those debts a machine-readable home so the P6 exit
+            # latch can see them.
+            new = detail.get("debts_awaiting_signoff") or detail.get("debts") or []
+            if isinstance(new, str):
+                new = [new]
+            debts = st.setdefault("debts", [])
+            for d in new:
+                if d not in debts:
+                    debts.append(d)
 
     elif event == "debt_signoff":
         signed = st.get("debts") or []
@@ -688,21 +1146,15 @@ def _apply_state_effects(st, phase, event, verdict, detail, seq,
     # place when nothing needed asking).
     adopted = detail.get("adopted_without_asking")
     asked = len(_questions_of(detail)) if event == "user_loop" else 0
-    if adopted or asked:
-        ledger = st.setdefault("question_ledger",
-                               {"asked": 0, "self_resolved": 0})
+    if adopted is not None or asked:
+        ledger = st.setdefault(
+            "question_ledger", {"asked": 0, "self_resolved": 0,
+                                "self_resolved_records": []})
+        ledger.setdefault("self_resolved_records", [])
         ledger["asked"] = ledger.get("asked", 0) + asked
-        if isinstance(adopted, dict):
-            n = len(adopted)
-        elif isinstance(adopted, list):
-            n = len(adopted)
-        elif isinstance(adopted, int):
-            n = adopted
-        elif adopted:
-            n = 1
-        else:
-            n = 0
-        ledger["self_resolved"] = ledger.get("self_resolved", 0) + n
+        ledger["self_resolved_records"].extend(_adopted_records(adopted, seq))
+        # Do not trust a caller-provided integer. The total is evidence-derived.
+        ledger["self_resolved"] = len(ledger["self_resolved_records"])
 
 
 def cmd_event(a):
@@ -715,6 +1167,160 @@ def cmd_event(a):
     detail = parse_json_arg(a.detail, "--detail") if a.detail else {}
     st = load_state(run_dir)
     facts = _scan_log(run_dir)
+
+    if isinstance(detail, dict) and "adopted_without_asking" in detail:
+        _validate_adopted_without_asking(detail["adopted_without_asking"])
+
+    # The event protocol below is append-only: validation happens before either
+    # state.json or run.jsonl changes, so malformed evidence never becomes history.
+    if a.event in {"work_started", "work_finished"}:
+        if not isinstance(detail, dict) or not _nonempty_string(detail.get("activity_id")):
+            raise CCLogError(f"refusing to log {a.event}: detail.activity_id is required")
+        if a.phase == "P4":
+            missing = [key for key in ("component", "logical_wave_id", "execution_batch_id")
+                       if not _nonempty_string(detail.get(key))]
+            if missing:
+                raise CCLogError(
+                    f"refusing to log {a.event} in P4: detail requires "
+                    + ", ".join(missing))
+        if a.event == "work_finished":
+            started = facts["open_activities"].get(detail["activity_id"])
+            if not started:
+                raise CCLogError(
+                    f"refusing to log work_finished: activity_id {detail['activity_id']!r} "
+                    "has no matching open work_started event")
+            if a.phase != started["phase"]:
+                raise CCLogError(
+                    f"refusing to log work_finished: activity_id {detail['activity_id']!r} "
+                    f"started in {started['phase']}, not {a.phase}")
+            if started["phase"] == "P4":
+                mismatched = [
+                    key for key in ("component", "logical_wave_id", "execution_batch_id")
+                    if detail.get(key) != started["detail"].get(key)
+                ]
+                if mismatched:
+                    raise CCLogError(
+                        "refusing to log work_finished in P4: detail must match its "
+                        "work_started record for " + ", ".join(mismatched))
+
+    if a.event == "design_amendment":
+        if not isinstance(detail, dict):
+            raise CCLogError("refusing to log design_amendment: detail must be an object")
+        for key in ("task_id", "reason"):
+            if not _nonempty_string(detail.get(key)):
+                raise CCLogError(f"refusing to log design_amendment: detail.{key} is required")
+        for key in ("planned_files", "actual_files"):
+            if not (isinstance(detail.get(key), list) and detail[key]
+                    and all(_nonempty_string(path) for path in detail[key])):
+                raise CCLogError(
+                    f"refusing to log design_amendment: detail.{key} must be a non-empty list[str]")
+
+    if a.event == "verification_recorded":
+        if not isinstance(detail, dict):
+            raise CCLogError("refusing to log verification_recorded: detail must be an object")
+        for key in ("tool", "status", "artifact"):
+            if not _nonempty_string(detail.get(key)):
+                raise CCLogError(f"refusing to log verification_recorded: detail.{key} is required")
+        counts = detail.get("counts")
+        if not isinstance(counts, dict) or any(
+                not isinstance(counts.get(key), int) or isinstance(counts.get(key), bool)
+                or counts[key] < 0 for key in ("error", "warning", "info")):
+            raise CCLogError(
+                "refusing to log verification_recorded: detail.counts requires "
+                "non-negative integer error, warning, and info values")
+        accepted_warnings = detail.get("accepted_warnings", [])
+        if not isinstance(accepted_warnings, list):
+            raise CCLogError(
+                "refusing to log verification_recorded: detail.accepted_warnings must be a list")
+        status = detail["status"]
+        warning_count = counts["warning"]
+        if counts["error"] > 0 and status.startswith("PASS"):
+            raise CCLogError(
+                "refusing to log verification_recorded: a PASS status cannot report errors")
+        if warning_count == 0 and accepted_warnings:
+            raise CCLogError(
+                "refusing to log verification_recorded: accepted_warnings must be empty "
+                "when warning count is zero")
+        if warning_count > 0 and status.startswith("PASS"):
+            if len(accepted_warnings) != warning_count:
+                raise CCLogError(
+                    "refusing to log verification_recorded: every warning in a PASS "
+                    "record requires an accepted_warnings entry")
+            for index, warning in enumerate(accepted_warnings):
+                if not isinstance(warning, dict) or any(
+                        not _nonempty_string(warning.get(key))
+                        for key in ("rule", "path", "reason")):
+                    raise CCLogError(
+                        "refusing to log verification_recorded: "
+                        f"accepted_warnings[{index}] requires rule, path, and reason")
+
+    if a.event == "baseline_accept":
+        if not isinstance(detail, dict):
+            raise CCLogError("refusing to log baseline_accept: detail must be an object")
+        supplied_hash = detail.get("sha256", detail.get("hash"))
+        if (not _nonempty_string(detail.get("path"))
+                or not _nonempty_string(supplied_hash)
+                or not _nonempty_string(detail.get("purpose"))
+                or type(detail.get("commit_allowed")) is not bool):
+            raise CCLogError(
+                "refusing to log baseline_accept: path, sha256/hash, non-empty purpose, "
+                "and boolean commit_allowed are required")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", supplied_hash):
+            raise CCLogError("refusing to log baseline_accept: sha256/hash must be a SHA-256 hex digest")
+        try:
+            with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as source:
+                manifest = json.load(source)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CCLogError(f"refusing to log baseline_accept: cannot read manifest ({exc})")
+        preexisting = (manifest.get("preexisting_files") or []) if isinstance(manifest, dict) else []
+        match = next((record for record in preexisting if isinstance(record, dict)
+                      and record.get("path") == detail["path"]), None)
+        recorded_hash = (match or {}).get("sha256") or (match or {}).get("hash")
+        current_path = os.path.join(a.root, detail["path"])
+        if (not match or supplied_hash != recorded_hash or not os.path.isfile(current_path)
+                or _sha256_file(current_path) != recorded_hash):
+            raise CCLogError(
+                "refusing to log baseline_accept: path and hash must match an unchanged "
+                "manifest.preexisting_files record from init")
+
+    if a.event == "debt_signoff_reused":
+        current_debts = st.get("debts") or []
+        debts = detail.get("debts") if isinstance(detail, dict) else None
+        user_loop_seq = detail.get("user_loop_seq") if isinstance(detail, dict) else None
+        debt_signoff_seq = detail.get("debt_signoff_seq") if isinstance(detail, dict) else None
+        source_loop = facts["debt_user_loops"].get(user_loop_seq)
+        source_signoff = facts["debt_signoffs"].get(debt_signoff_seq)
+        source_pwc = next(
+            (record for record in reversed(facts["g5_pwc_verdicts"])
+             if isinstance(record.get("seq"), int)
+             and isinstance(debt_signoff_seq, int)
+             and record["seq"] < debt_signoff_seq),
+            None,
+        )
+        source_pwc_debts = ((source_pwc or {}).get("detail") or {}).get(
+            "debts_awaiting_signoff",
+            ((source_pwc or {}).get("detail") or {}).get("debts"),
+        )
+        if isinstance(source_pwc_debts, str):
+            source_pwc_debts = [source_pwc_debts]
+        source_answer = (source_signoff or {}).get("answer") or (source_signoff or {}).get("user_response")
+        reused_answer = detail.get("answer") or detail.get("user_response") if isinstance(detail, dict) else None
+        chain_seqs = {((source_pwc or {}).get("seq")), user_loop_seq, debt_signoff_seq}
+        force_formed = bool(chain_seqs & facts["force_formed_event_seqs"])
+        if not (
+            isinstance(debts, list) and debts == current_debts and bool(debts)
+            and isinstance(user_loop_seq, int) and isinstance(debt_signoff_seq, int)
+            and source_pwc and source_loop and source_signoff
+            and source_pwc["seq"] < user_loop_seq < debt_signoff_seq
+            and source_pwc_debts == debts
+            and source_loop.get("debts") == debts and source_signoff.get("debts") == debts
+            and source_signoff.get("user_loop_seq") == user_loop_seq
+            and _nonempty_string(source_answer) and not force_formed
+            and (reused_answer is None or reused_answer == source_answer)
+        ):
+            raise CCLogError(
+                "refusing to log debt_signoff_reused: current debts must exactly match "
+                "a valid prior G5 verdict/user_loop/debt_signoff chain and its user answer")
 
     # --- gate latch -------------------------------------------------------
     # Refuse to record entry into a gated phase before its gate has spoken
@@ -916,8 +1522,8 @@ def cmd_event(a):
         # own violation instead of the first one masking the rest.)
         if detail.get("commit") != "deferred":
             dirty = _git_out(a.root, "status", "--porcelain") or ""
-            dirty = [l for l in dirty.splitlines()
-                     if l and not l[3:].startswith(".cc-skill")]
+            dirty = [line for line in dirty.splitlines()
+                     if line and not line[3:].startswith(".cc-skill")]
             if dirty:
                 if not a.force:
                     raise CCLogError(
@@ -936,6 +1542,13 @@ def cmd_event(a):
                             "explicit deferral)",
                     "actual": f"{len(dirty)} uncommitted path(s), e.g. "
                               f"{dirty[:3]}"})
+
+    # --- G3 ownership declarations require component-level graph evidence ---
+    if (a.event == "gate_verdict" and a.phase == "G3"
+            and a.verdict == "APPROVED"):
+        component_graph_degraded_reason = _validate_g3_component_graph(run_dir, st)
+        if component_graph_degraded_reason is not None:
+            detail["component_graph_degraded_reason"] = component_graph_degraded_reason
 
     # --- PASS_WITH_CONCERNS must name its concerns ------------------------
     # The verdict means "passing, but with debts the user must accept". A PWC that
@@ -1001,19 +1614,37 @@ def cmd_event(a):
                     + "; ".join(errs[:6])
                     + (f" (+{len(errs) - 6} more)" if len(errs) > 6 else "")
                     + ". The review's findings must live in the artifact in "
-                    f"contract shape: every finding carries id / scope / "
-                    f"evidence (scope is what the delta review routes on), "
-                    f"plus verdict and review_mode. Run 7 delivered exactly "
-                    f"to the old key-existence floor (id=None, evidence=None, "
-                    f"content in invented keys) — a latch validates what it "
-                    f"checks, so this one now checks every field downstream "
-                    f"consumers read. If the bypass is intentional, re-run "
-                    f"with --force.")
+                    "contract shape: every finding carries id / scope / "
+                    "evidence (scope is what the delta review routes on), "
+                    "plus verdict and review_mode. Run 7 delivered exactly "
+                    "to the old key-existence floor (id=None, evidence=None, "
+                    "content in invented keys) — a latch validates what it "
+                    "checks, so this one now checks every field downstream "
+                    "consumers read. If the bypass is intentional, re-run "
+                    "with --force.")
             violations.append({
                 "rule": "G5 verdict requires artifacts/g5-review.json in "
                         "contract shape (per-finding id/scope/evidence, "
                         "review_mode)",
                 "actual": "; ".join(errs[:6])})
+
+    # --- a passing G5 verdict must certify the P2/P4/baseline trace --------
+    if (a.event == "gate_verdict" and a.phase == "G5"
+            and a.verdict in GATE_PASSING["g5"]):
+        trace = _design_trace(run_dir, a.root, st)
+        trace_verdict = trace.get("verdict")
+        if trace_verdict == "FAIL":
+            raise CCLogError(
+                "refusing to log passing G5 verdict: design trace FAIL — "
+                "resolve P2/P4/baseline drift before certifying the review"
+            )
+        if (trace_verdict == "UNCHECKED"
+                and not _nonempty_string(detail.get("trace_degraded_reason"))):
+            raise CCLogError(
+                "refusing to log passing G5 verdict: design trace is UNCHECKED; "
+                "detail.trace_degraded_reason must name the evidence gap"
+            )
+        detail["design_trace"] = trace
 
     # --- P2 may not exit with constraints the artifact never carried -------
     # Run 3's design source had "## 8. 前端约束" requiring `StockSearchWidget`;
@@ -1122,16 +1753,16 @@ def cmd_event(a):
                 detail.setdefault("plan_graph", "NO_TASKS_DECLARED")
             elif not a.force:
                 raise CCLogError(
-                    f"refusing to log phase_exit P2: no plan found to check — "
-                    f"no artifact carries dag_tasks and no plan_artifact pointer "
-                    f"was given. Either keep dag_tasks in the P2 exit artifact, "
-                    f"or pass --detail "
-                    f"'{{\"plan_artifact\":\"artifacts/p4-components.json\"}}' "
-                    f"naming where the plan lives. Run 4 invented a separate "
-                    f"plan file silently and the checker approved a planless "
-                    f"artifact. If this task genuinely has no components, say so "
-                    f"with '\"planless\":true'. If the bypass is intentional, "
-                    f"re-run with --force.")
+                    "refusing to log phase_exit P2: no plan found to check — "
+                    "no artifact carries dag_tasks and no plan_artifact pointer "
+                    "was given. Either keep dag_tasks in the P2 exit artifact, "
+                    "or pass --detail "
+                    "'{\"plan_artifact\":\"artifacts/p4-components.json\"}' "
+                    "naming where the plan lives. Run 4 invented a separate "
+                    "plan file silently and the checker approved a planless "
+                    "artifact. If this task genuinely has no components, say so "
+                    "with '\"planless\":true'. If the bypass is intentional, "
+                    "re-run with --force.")
             else:
                 violations.append({
                     "rule": "P2 exit must either carry dag_tasks or declare "
@@ -1604,19 +2235,22 @@ def cmd_event(a):
             # trail but excluded from every subtraction ledger — that time is
             # work, not waiting.
             in_flight = sorted(facts["open_components"])
-            credited = not in_flight
+            activities_in_flight = sorted(facts["open_activities"])
+            credited = not in_flight and not activities_in_flight
             _append_jsonl(run_dir, _event_rec(
                 st.get("run_id"), seq, a.phase, "pause",
                 {"gap_ms": gap_ms, "since": facts["last_ts"],
                  "credited_to_idle": credited,
                  "components_in_flight": in_flight,
+                 "activities_in_flight": activities_in_flight,
                  "reason": (f"no events for {gap_ms // 60000} min; auto-"
                             f"annotated so phase durations exclude it"
                             if credited else
                             f"no events for {gap_ms // 60000} min while "
-                            f"{in_flight} were executing — recorded for audit "
-                            f"but NOT counted as idle, so component and phase "
-                            f"durations keep this time")}))
+                            f"components {in_flight} or activities "
+                            f"{activities_in_flight} were executing — recorded "
+                            f"for audit but NOT counted as idle, so component "
+                            f"and phase durations keep this time")}))
             if credited:
                 for k in facts["pause_ms_since_enter"]:
                     facts["pause_ms_since_enter"][k] += gap_ms
@@ -1832,6 +2466,26 @@ def _load_events(run_dir):
     return events
 
 
+def _event_details(events, event_name):
+    """Rebuild event details and identify records too old or malformed to trust."""
+    details = []
+    errors = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("event") != event_name:
+            continue
+        detail = event.get("detail")
+        if not isinstance(detail, dict):
+            errors.append(f"run.jsonl[{index}] {event_name}.detail is not an object")
+            continue
+        details.append(detail)
+    return details, errors
+
+
+def _cache_disagreement(state, key, event_details):
+    """Return whether the mutable cache diverges from append-only event facts."""
+    return not isinstance(state.get(key), list) or state[key] != event_details
+
+
 def cmd_report(a):
     """Generate report.md — the mechanical processing report at DONE.
 
@@ -1844,6 +2498,14 @@ def cmd_report(a):
     run_dir = _find_run_dir(a.root, a.slug)
     st = load_state(run_dir)
     events = _load_events(run_dir)
+    verification_records, verification_errors = _event_details(
+        events, "verification_recorded")
+    baseline_acceptances, baseline_acceptance_errors = _event_details(
+        events, "baseline_accept")
+    verification_cache_disagrees = _cache_disagreement(
+        st, "verification_records", verification_records)
+    acceptance_cache_disagrees = _cache_disagreement(
+        st, "baseline_acceptances", baseline_acceptances)
 
     t0, t1 = _parse_ts(events[0].get("ts")), _parse_ts(events[-1].get("ts"))
     wall_ms = int((t1 - t0).total_seconds() * 1000) if (t0 and t1) else None
@@ -1870,30 +2532,144 @@ def cmd_report(a):
                 phase_raw[ph] = phase_raw.get(ph, 0) + seg
                 phase_nsegs[ph] = phase_nsegs.get(ph, 0) + 1
 
-    # --- per-component: same two views, from dispatch to done --------------
-    # started_at (backfill after inline serial execution) is the effective
-    # start when present: runs 8-10 logged dispatch+done in the same second
-    # and recorded 0.5-0.9s against real minutes — a 600x ledger error.
-    dispatch_ts, backfilled, comp = {}, {}, {}
+    # --- P4 component spans: lifecycle evidence is the only duration source -
+    # A dispatch/done pair records a batch window, not worker execution. It may
+    # include queueing, retries, or post-hoc logging. Only a matching
+    # work_started/work_finished pair identifies a component's attributable span.
+    dispatch_ts, batch_comp, p4_done = {}, {}, {}
+    lifecycle_starts, lifecycle_spans = {}, []
     for e in events:
-        ev, det = e.get("event"), e.get("detail") or {}
+        phase, ev, det = e.get("phase"), e.get("event"), e.get("detail") or {}
         name = det.get("component") or det.get("task")
-        if not name:
+        if phase == "P4" and ev == "work_started":
+            activity_id = det.get("activity_id")
+            if activity_id and name:
+                lifecycle_starts[activity_id] = {
+                    "component": name,
+                    "ts": e.get("ts"),
+                }
+        elif phase == "P4" and ev == "work_finished":
+            activity_id = det.get("activity_id")
+            start = lifecycle_starts.pop(activity_id, None)
+            if start and start["component"] == name:
+                began, finished = _parse_ts(start["ts"]), _parse_ts(e.get("ts"))
+                if began and finished:
+                    lifecycle_spans.append({
+                        "component": name,
+                        "activity_id": activity_id,
+                        "start": began,
+                        "end": finished,
+                        "raw": max(0, int((finished - began).total_seconds() * 1000)),
+                    })
+
+        if phase != "P4" or not name:
             continue
         if ev == "agent_dispatch":
             started = det.get("started_at")
             dispatch_ts[name] = started if _parse_ts(started) else e.get("ts")
-            backfilled[name] = bool(started and _parse_ts(started))
         elif ev == "component_done":
             rec = {"status": det.get("status", "DONE")}
-            if e.get("duration_ms") is not None:
-                rec["rec"] = e["duration_ms"]
-            s, x = _parse_ts(dispatch_ts.get(name)), _parse_ts(e.get("ts"))
-            if s and x:
-                rec["raw"] = max(0, int((x - s).total_seconds() * 1000))
+            begin, finish = _parse_ts(dispatch_ts.get(name)), _parse_ts(e.get("ts"))
+            if begin and finish:
+                rec["batch_window"] = max(0, int((finish - begin).total_seconds() * 1000))
             if det.get("tests"):
                 rec["tests"] = det["tests"]
-            comp[name] = rec
+            batch_comp[name] = rec
+            if rec["status"] == "DONE":
+                p4_done[name] = rec
+
+    spans_by_component = {}
+    for span in lifecycle_spans:
+        spans_by_component.setdefault(span["component"], []).append(span)
+    missing_lifecycle = sorted(set(p4_done) - set(spans_by_component))
+    if p4_done and not missing_lifecycle:
+        timestamp_granularity = "lifecycle"
+    elif p4_done:
+        timestamp_granularity = "batched"
+    else:
+        timestamp_granularity = "unsupported"
+
+    comp = {}
+    if timestamp_granularity == "lifecycle":
+        for name, done in p4_done.items():
+            spans = spans_by_component[name]
+            comp[name] = {
+                "status": done["status"],
+                "raw": sum(span["raw"] for span in spans),
+                "activities": [span["activity_id"] for span in spans],
+                "tests": done.get("tests"),
+            }
+
+    # Model routing is observational: only a completed component's lifecycle
+    # duration can be joined to its P2 task id. P2 may live at the standard
+    # artifact path or at the explicit state pointer recorded for this run.
+    model_roi = {"models": {}, "unassigned": [], "unsupported": []}
+    if timestamp_granularity == "lifecycle":
+        p2_artifact = (st.get("artifact_pointers") or {}).get(
+            "p2", "artifacts/p2-design.json"
+        )
+        if not isinstance(p2_artifact, str):
+            p2_artifact = "<invalid P2 artifact pointer>"
+        p2_path = (
+            p2_artifact if os.path.isabs(p2_artifact)
+            else os.path.join(run_dir, p2_artifact)
+        )
+        try:
+            with open(p2_path, encoding="utf-8") as source:
+                p2_design = json.load(source)
+        except (OSError, json.JSONDecodeError) as error:
+            model_roi["unsupported"].append(
+                f"无法读取 P2 任务路由证据 `{p2_artifact}`（{error}）"
+            )
+        else:
+            dag_tasks = p2_design.get("dag_tasks") if isinstance(p2_design, dict) else None
+            if not isinstance(dag_tasks, list):
+                model_roi["unsupported"].append(
+                    f"P2 任务路由证据 `{p2_artifact}` 未提供 dag_tasks[]"
+                )
+            else:
+                tasks_by_id = {}
+                for index, task in enumerate(dag_tasks):
+                    if not isinstance(task, dict):
+                        continue
+                    task_id, task_id_errors = design_trace._normalized_task_id(
+                        task, f"P2 dag_tasks[{index}]"
+                    )
+                    if task_id_errors:
+                        label = (
+                            "P2 task ID schema冲突"
+                            if "must match" in task_id_errors[0]
+                            else "P2 task ID schema无效"
+                        )
+                        model_roi["unsupported"].append(
+                            f"{label}：{task_id_errors[0]}"
+                        )
+                        continue
+                    tasks_by_id.setdefault(task_id, []).append(task)
+                    model = task.get("recommended_model")
+                    if isinstance(model, str) and model.strip():
+                        model = model.strip()
+                        model_roi["models"].setdefault(
+                            model, {"task_count": 0, "component_count": 0, "total_ms": 0}
+                        )["task_count"] += 1
+
+                for component, record in comp.items():
+                    matches = tasks_by_id.get(component, [])
+                    if len(matches) != 1:
+                        detail = "未匹配 P2 dag_tasks[].id" if not matches else "匹配多个 P2 dag_tasks[].id"
+                        model_roi["unsupported"].append(
+                            f"组件 `{component}`：{detail}"
+                        )
+                        continue
+                    model = matches[0].get("recommended_model")
+                    if not isinstance(model, str) or not model.strip():
+                        model_roi["unassigned"].append(
+                            f"组件 `{component}` 匹配任务 `{component}`，但没有 recommended_model"
+                        )
+                        continue
+                    stats = model_roi["models"][model.strip()]
+                    stats["component_count"] += 1
+                    stats["total_ms"] += record["raw"]
 
     # --- user wait: each user_loop → the next non-pause event (the answer)
     user_wait_ms, user_pause_count, questions = 0, 0, 0
@@ -1960,14 +2736,11 @@ def cmd_report(a):
     planned_wave = None
     if isinstance(waves, list) and waves:
         planned_wave = max(len(w) if isinstance(w, list) else 1 for w in waves)
-    spans = []
-    for name, r in comp.items():
-        if r.get("raw") is not None:
-            d = dispatch_ts.get(name)
-            if d:
-                t = _parse_ts(d)
-                spans.append((t, t + datetime.timedelta(milliseconds=r["raw"]),
-                              name))
+    spans = [
+        (span["start"], span["end"], span["component"])
+        for span in lifecycle_spans
+        if span["component"] in comp
+    ]
     actual_overlap = 0
     for i, (s1, e1, _) in enumerate(spans):
         for s2, e2, _ in spans[i + 1:]:
@@ -2015,15 +2788,10 @@ def cmd_report(a):
         return max(0.0, total)
 
     parallel_active = None
-    if suspensions:
+    if suspensions and timestamp_granularity == "lifecycle":
         comp_active_sum = 0.0
-        for name, r in comp.items():
-            if r.get("raw") is None or not dispatch_ts.get(name):
-                continue
-            d = _parse_ts(dispatch_ts[name])
-            if d is None:
-                continue
-            act = _active_ms(d, d + datetime.timedelta(milliseconds=r["raw"]))
+        for start, end, _ in spans:
+            act = _active_ms(start, end)
             if act is not None:
                 comp_active_sum += act
         p4s, p4x = _parse_ts(enter_ts.get("P4")), _parse_ts(exit_ts.get("P4"))
@@ -2043,19 +2811,18 @@ def cmd_report(a):
     baseline = manifest.get("baseline_commit")
     ref = baseline or "HEAD"
     shortstat = _git_out(a.root, "diff", "--shortstat", ref)
-    numstat = _git_out(a.root, "diff", "--numstat", ref) or ""
-    plus_del = {}
-    for line in numstat.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3:
-            plus_del[parts[2]] = (parts[0], parts[1])
-    porcelain = _git_out(a.root, "status", "--porcelain") or ""
+    plus_del = _git_numstat_paths(a.root, ref) or {}
+    porcelain_paths = _git_porcelain_v1_paths(a.root) or []
+    preexisting_paths = {
+        record.get("path") for record in manifest.get("preexisting_files", [])
+        if isinstance(record, dict) and isinstance(record.get("path"), str)
+    }
     new_files, new_lines = [], 0
-    for line in porcelain.splitlines():
-        if not line.startswith("??"):
+    for status, path in porcelain_paths:
+        if status != "??":
             continue
-        path = line[3:]
-        if path.startswith(".cc-skill"):
+        if (path == ".cc-skill" or path.startswith(".cc-skill/")
+                or path in preexisting_paths):
             continue
         new_files.append(path)
         try:
@@ -2083,6 +2850,12 @@ def cmd_report(a):
     L.append(f"| 用户等待（user_loop → 应答，{user_pause_count} 次 / "
              f"{questions} 问） | {_fmt_dur(user_wait_ms)} |")
     L.append(f"| 空转（pause·计为空闲） | {_fmt_dur(idle_ms)} |")
+    if timestamp_granularity == "lifecycle":
+        L.append("| 时间戳粒度 | timestamp_granularity=lifecycle（组件耗时和 P4 并行度由 work_started/work_finished 支持） |")
+    elif timestamp_granularity == "batched":
+        L.append("| 时间戳粒度 | timestamp_granularity=batched（存在 P4 DONE 组件缺少 finished lifecycle pair；dispatch→done 仅为批窗口，不可归因） |")
+    else:
+        L.append("| 时间戳粒度 | timestamp_granularity=unsupported（旧日志未提供 P4 DONE 组件的完整 lifecycle 证据） |")
     if inflight_gaps:
         L.append(f"| 在制静默（pause·未计空闲，见 F1 修复说明） | {inflight_gaps} 段 |")
     for s, x, s_comps in suspensions:
@@ -2099,7 +2872,7 @@ def cmd_report(a):
                      f"污染——查 dispatch 的 started_at 是否为编造时间戳，"
                      f"run 13 曾以此打出 261.86x）{wave_desc} |")
         else:
-            L.append(f"| P4 并行度（Σ组件墙钟 ÷ P4 墙钟） | {parallel:.2f}x "
+            L.append(f"| P4 并行度（Σ生命周期组件跨度 ÷ P4 墙钟） | {parallel:.2f}x "
                      f"{wave_desc} |")
     if parallel_active:
         L.append(f"| P4 并行度（活跃口径，剔除疑似挂起段） | "
@@ -2119,22 +2892,89 @@ def cmd_report(a):
                      f"{_flag(phase_rec.get(ph), phase_raw.get(ph))}"
                      f" | {_fmt_dur(phase_raw.get(ph))} |")
     L.append("")
-    if comp:
+    if timestamp_granularity == "lifecycle":
         L.append("### 组件耗时")
         L.append("")
-        L.append("| 组件 | 状态 | 记录耗时¹ | 墙钟 | 测试 |")
+        L.append("| 组件 | 状态 | lifecycle-supported duration | 活动 | 测试 |")
         L.append("|---|---|---|---|---|")
         for name, r in comp.items():
-            bf = "*" if backfilled.get(name) else ""
-            L.append(f"| {name}{bf} | {r['status']} | {_fmt_dur(r.get('rec'))}"
-                     f"{_flag(r.get('rec'), r.get('raw'))}"
-                     f" | {_fmt_dur(r.get('raw'))} | {r.get('tests', '—')} |")
+            L.append(f"| {name} | {r['status']} | {_fmt_dur(r.get('raw'))}"
+                     f" | {', '.join(r['activities'])} | {r.get('tests') or '—'} |")
         L.append("")
-        L.append("¹ 记录耗时 = pause 校正值；标 ⚠ 表示与墙钟偏差超过 20%，以墙钟列为准；"
-                 "组件名带 \\* 表示 dispatch 为补录（detail.started_at 声明真实开始时刻，"
-                 "墙钟从该时刻起算——内联串行执行后补记时必须给出，"
-                 "否则 dispatch/done 同刻会把几分钟记成 0 秒）。")
+        L.append("组件耗时仅由匹配的 work_started/work_finished lifecycle span 计算。")
         L.append("")
+        L.append("### 模型路由 ROI（观测）")
+        L.append("")
+        L.append("仅报告 P2 recommended_model 与 lifecycle duration 的观察性归因；"
+                 "不推测成本或质量。")
+        if model_roi["models"]:
+            L.append("")
+            L.append("| 模型 | 任务数 | 已归因组件数 | 总 duration | 平均 duration |")
+            L.append("|---|---:|---:|---:|---:|")
+            for model, stats in sorted(model_roi["models"].items()):
+                count = stats["component_count"]
+                average = stats["total_ms"] // count if count else None
+                L.append(
+                    f"| {model} | {stats['task_count']} | {count} | "
+                    f"{_fmt_dur(stats['total_ms']) if count else '—'} | "
+                    f"{_fmt_dur(average)} |"
+                )
+        else:
+            L.append("")
+            L.append("- unsupported：没有可用于模型路由的 recommended_model 任务。")
+        for detail in model_roi["unassigned"]:
+            L.append(f"- 未分配：{detail}。")
+        for detail in model_roi["unsupported"]:
+            L.append(f"- unsupported：{detail}。")
+        L.append("")
+    elif timestamp_granularity == "batched":
+        L.append("### P4 批窗口（不可归因）")
+        L.append("")
+        L.append("存在 DONE 组件缺少 finished lifecycle pair；下列 dispatch→done 值仅描述"
+                 "批窗口，不是 worker duration，不能归因给组件。")
+        L.append("")
+        L.append("| 组件 | 状态 | 批窗口（不可归因） | 测试 |")
+        L.append("|---|---|---|---|")
+        for name, r in batch_comp.items():
+            L.append(f"| {name} | {r['status']} | {_fmt_dur(r.get('batch_window'))}"
+                     f" | {r.get('tests', '—')} |")
+        L.append("")
+    else:
+        L.append("### 组件耗时")
+        L.append("")
+        L.append("unsupported：旧日志没有 P4 DONE 组件的完整 lifecycle 证据；"
+                 "dispatch→done 不作为组件耗时、P4 并行度或模型 ROI 输出。")
+        L.append("")
+    L.append("## 验证记录")
+    L.append("")
+    if verification_cache_disagrees:
+        L.append("unsupported：state.json 与 run.jsonl verification_recorded 不一致；"
+                 "仅按 run.jsonl 重建。")
+    for error in verification_errors:
+        L.append(f"unsupported：{error}。")
+    if not verification_records:
+        if verification_errors:
+            L.append("unsupported：verification_recorded 事件不足，无法重建验证记录。")
+        else:
+            L.append("unsupported：run.jsonl 未提供 verification_recorded 事件；"
+                     "无法从事件重建验证记录。")
+    else:
+        for record in verification_records:
+            counts = record.get("counts") or {}
+            errors = counts.get("error", "?") if isinstance(counts, dict) else "?"
+            warnings = counts.get("warning", "?") if isinstance(counts, dict) else "?"
+            info = counts.get("info", "?") if isinstance(counts, dict) else "?"
+            L.append(f"- **{record.get('tool', 'unknown')}**: {record.get('status', 'unknown')} — "
+                     f"{errors} errors / {warnings} warnings / {info} info")
+            for accepted in record.get("accepted_warnings") or []:
+                if not isinstance(accepted, dict):
+                    L.append("  - accepted warning: unsupported record")
+                    continue
+                rule = accepted.get("rule", "unknown")
+                path = accepted.get("path", "unknown")
+                reason = accepted.get("reason", "unsupported")
+                L.append(f"  - accepted `{rule}` at `{path}`: {reason}")
+    L.append("")
     gv = st.get("gate_verdicts") or {}
     loops = st.get("loops") or {}
     L.append("## 门与裁决")
@@ -2164,7 +3004,7 @@ def cmd_report(a):
             L.append(f"相对基线 `{ref[:12] if ref != 'HEAD' else 'HEAD'}`：无已跟踪文件改动")
         if new_files:
             L.append("")
-            L.append(f"新增 {len(new_files)} 个文件，共 {new_lines} 行：")
+            L.append(f"本轮新增 {len(new_files)} 个文件，共 {new_lines} 行：")
             L.append("")
             for path in new_files:
                 L.append(f"- `{path}`")
@@ -2182,10 +3022,46 @@ def cmd_report(a):
         dirty0 = manifest.get("dirty_at_init")
         if dirty0:
             L.append(">")
-            L.append(f"> ⚠ init 时工作区已有 {dirty0} 个未提交文件"
-                     f"（如 {manifest.get('dirty_at_init_sample')}）——"
-                     f"本清单可能混入上一轮的交付，归因以下一轮干净基线为准"
-                     f"（run 9 曾把 run 8 的 18 个文件记成自己的新增）。")
+            L.append(f"> ⚠ init 时工作区已有 {dirty0} 个未提交文件；这些路径已从“本轮新增”统计排除。")
+    L.append("")
+    L.append("## 基线来源")
+    L.append("")
+    preexisting_records = manifest.get("preexisting_files")
+    if not isinstance(preexisting_records, list):
+        L.append("unsupported：旧 manifest 未记录 preexisting_files。")
+    else:
+        if acceptance_cache_disagrees:
+            L.append("unsupported：state.json 与 run.jsonl baseline_accept 不一致；"
+                     "仅按 run.jsonl 重建。")
+        for error in baseline_acceptance_errors:
+            L.append(f"unsupported：{error}。")
+        if preexisting_records and not baseline_acceptances:
+            L.append("unsupported：run.jsonl 未提供 baseline_accept 事件；"
+                     "无法从事件重建初始脏文件接受记录。")
+        accepted_by_path = {
+            record.get("path"): record for record in baseline_acceptances
+            if isinstance(record, dict) and isinstance(record.get("path"), str)
+        }
+        accepted = [record for record in preexisting_records
+                    if isinstance(record, dict) and record.get("path") in accepted_by_path]
+        unaccepted = [record for record in preexisting_records
+                      if isinstance(record, dict) and record.get("path") not in accepted_by_path]
+        L.append("### 已接受的初始脏文件")
+        if accepted:
+            for record in accepted:
+                acceptance = accepted_by_path[record["path"]]
+                L.append(f"- `{record['path']}` — {acceptance.get('purpose', 'accepted')}"
+                         f"（init sha256 `{record.get('sha256', 'unsupported')}`）")
+        else:
+            L.append("- 无")
+        L.append("")
+        L.append("### 未接受的初始脏文件")
+        if unaccepted:
+            for record in unaccepted:
+                L.append(f"- `{record.get('path', 'unsupported')}` — init status "
+                         f"`{record.get('status', 'unsupported')}`")
+        else:
+            L.append("- 无")
     L.append("")
     out = os.path.join(run_dir, "report.md")
     atomic_write(out, "\n".join(L) + "\n")
@@ -2199,16 +3075,25 @@ def main():
     p = argparse.ArgumentParser(prog="cc_log.py")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("init"); pi.set_defaults(fn=cmd_init)
-    pi.add_argument("--root", required=True); pi.add_argument("--slug", default="")
-    pi.add_argument("--title", default=""); pi.add_argument("--max-parallel", type=int, default=4)
+    pi = sub.add_parser("init")
+    pi.set_defaults(fn=cmd_init)
+    pi.add_argument("--root", required=True)
+    pi.add_argument("--slug", default="")
+    pi.add_argument("--title", default="")
+    pi.add_argument("--max-parallel", type=int, default=4)
 
-    pe = sub.add_parser("event"); pe.set_defaults(fn=cmd_event)
-    pe.add_argument("--root", required=True); pe.add_argument("--slug", required=True)
-    pe.add_argument("--phase", required=True); pe.add_argument("--event", required=True)
-    pe.add_argument("--agent", default=None); pe.add_argument("--skills", default="")
-    pe.add_argument("--superpowers", default=""); pe.add_argument("--verdict", default=None)
-    pe.add_argument("--status", default=None); pe.add_argument("--detail", default="")
+    pe = sub.add_parser("event")
+    pe.set_defaults(fn=cmd_event)
+    pe.add_argument("--root", required=True)
+    pe.add_argument("--slug", required=True)
+    pe.add_argument("--phase", required=True)
+    pe.add_argument("--event", required=True)
+    pe.add_argument("--agent", default=None)
+    pe.add_argument("--skills", default="")
+    pe.add_argument("--superpowers", default="")
+    pe.add_argument("--verdict", default=None)
+    pe.add_argument("--status", default=None)
+    pe.add_argument("--detail", default="")
     pe.add_argument("--duration-ms", dest="duration_ms", type=int, default=None)
     pe.add_argument("--scope", default=None,
                     help="comma-separated component:layer list for scoped re-entry "
@@ -2218,16 +3103,22 @@ def main():
     pe.add_argument("--force", action="store_true",
                     help="bypass the gate latch; logs a MAJOR process_violation")
 
-    ps = sub.add_parser("state"); ps.set_defaults(fn=cmd_state)
-    ps.add_argument("--root", required=True); ps.add_argument("--slug", required=True)
+    ps = sub.add_parser("state")
+    ps.set_defaults(fn=cmd_state)
+    ps.add_argument("--root", required=True)
+    ps.add_argument("--slug", required=True)
     ps.add_argument("--json", required=True)
 
-    pm = sub.add_parser("summary"); pm.set_defaults(fn=cmd_summary)
-    pm.add_argument("--root", required=True); pm.add_argument("--slug", required=True)
+    pm = sub.add_parser("summary")
+    pm.set_defaults(fn=cmd_summary)
+    pm.add_argument("--root", required=True)
+    pm.add_argument("--slug", required=True)
     pm.add_argument("--body-file", dest="body_file", default=None)
 
-    pr = sub.add_parser("report"); pr.set_defaults(fn=cmd_report)
-    pr.add_argument("--root", required=True); pr.add_argument("--slug", required=True)
+    pr = sub.add_parser("report")
+    pr.set_defaults(fn=cmd_report)
+    pr.add_argument("--root", required=True)
+    pr.add_argument("--slug", required=True)
 
     a = p.parse_args()
     try:

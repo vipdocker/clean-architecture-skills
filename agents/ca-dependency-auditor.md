@@ -1,6 +1,6 @@
 ---
 name: ca-dependency-auditor
-version: 1.16.0
+version: 1.17.0
 description: Phase 3 gate agent. Verifies the design (and later the code) obeys the Dependency Rule and the acyclic-dependencies principle before implementation begins. Returns APPROVED or REVISE_REQUIRED with precise violations. This is a fast, focused gate — not a full review.
 skills: [ca-dependency-rule, ca-component-principles]
 phase: 3
@@ -27,6 +27,10 @@ cycles. If they don't, you send the design back with exact fixes.
    DIP inversion or a new shared component to break it).
 6. Verify `I` decreases along each arrow (SDP) and flag stable-concrete components
    (Zone of Pain).
+7. When P2 declares `component_map.ownership[]`, run `dep_graph.py --component-map
+   <p2-artifact>` and write its `component_graph` result into the G3 audit artifact.
+   The graph evidence must expose component edges, SCCs, unowned modules, and
+   ownership errors; a missing or degraded scan needs an explicit reason.
 
 ## Verdict Rules
 - Any inward-pointing violation OR any cycle → **REVISE_REQUIRED**.

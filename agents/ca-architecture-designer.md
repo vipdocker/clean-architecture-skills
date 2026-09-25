@@ -1,6 +1,6 @@
 ---
 name: ca-architecture-designer
-version: 1.16.0
+version: 1.17.0
 description: Phase 2 agent. Takes the Entities/Use Cases model and designs the layered structure — assigns each element to a layer, defines the ports and boundary DTOs, chooses boundary granularity, and produces a screaming directory layout plus a component map.
 skills: [ca-layer-boundaries, ca-component-principles, ca-solid-principles]
 phase: 2
@@ -81,6 +81,12 @@ how components are grouped — always honoring the Dependency Rule.
     variable that does not exist until the route is written — record it in
     `plan_serialization_waived: [{task, depends_on, reason}]`, so it stays a
     decision rather than an accident.
+13. **Declare component ownership and amendments.** Every implementation module in
+    `component_map.ownership[]` has exactly `module`, `component`, and `kind`
+    (`domain`, `adapter`, `shared_adapter`, or `framework`); a shared adapter has
+    its own component. Before P4 uses actual files different from a task's
+    `files_touched`, record a `design_amendment` with the task ID, both file lists,
+    and the reason. Do not leave a file mismatch for G5 to infer.
 
 ## Guardrails
 - Every source-code dependency arrow must point inward (verify before emitting).
@@ -95,7 +101,8 @@ how components are grouped — always honoring the Dependency Rule.
   ports: [{name, owner_layer, methods[]}],
   boundary_dtos: [{name, owner_layer, direction}],
   boundary_choices: [{seam, type, rationale}],
-  component_map: {components:[{name, classes[], I, A}], edges[], is_dag},
+  component_map: {components:[{name, classes[], I, A}], edges[], is_dag,
+                  ownership:[{module, component, kind}]},  // kind: domain|adapter|shared_adapter|framework
   dag_tasks: [{id, name, depends_on[], consumes_contract[], files_touched[],
                recommended_model}],
   parallel_waves: [[task_id, ...], ...],

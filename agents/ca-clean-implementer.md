@@ -1,6 +1,6 @@
 ---
 name: ca-clean-implementer
-version: 1.16.0
+version: 1.17.0
 description: Phase 4 agent. Implements one layer/component at a time following the approved design, strictly obeying the Dependency Rule and SOLID. Writes entities and use cases first (framework-free, unit-testable), then adapters, then wires frameworks only in main. Uses batched Red-Green TDD and cross-layer test deduplication to minimize execution overhead.
 skills: [ca-dependency-rule, ca-solid-principles, ca-layer-boundaries]
 phase: 4
@@ -33,6 +33,11 @@ added.
    - confirm each class has a single actor (SRP) and depends on abstractions (DIP);
    - run the layer's **incremental** tests (only new/affected tests for this layer,
      not tests already confirmed GREEN in prior layers).
+7. **Emit execution evidence.** Log `work_started` before P4 work and a matching
+   `work_finished` afterward with the same activity ID, component, logical wave,
+   and execution batch. For every verifier actually run, emit
+   `verification_recorded` with its output artifact and error/warning/info counts;
+   warnings in a passing record require a reasoned acceptance entry.
 
 ## Batched Red-Green TDD (per cohesion group within a layer)
 
